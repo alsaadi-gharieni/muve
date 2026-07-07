@@ -88,7 +88,89 @@ FREQUENCY_PROFILES: list[FrequencyProfile] = [
         (80, 120),
         (120, 150),
     ),
+    FrequencyProfile(
+        "narrow_15_23",
+        "Narrow 15-23 Hz (All Zones)",
+        (15, 23),
+        (15, 23),
+        (15, 23),
+        (15, 23),
+    ),
+    FrequencyProfile(
+        "narrow_20_30",
+        "Narrow 20-30 Hz (All Zones)",
+        (20, 30),
+        (20, 30),
+        (20, 30),
+        (20, 30),
+    ),
+    FrequencyProfile(
+        "narrow_27_40",
+        "Narrow 27-40 Hz (All Zones)",
+        (27, 40),
+        (27, 40),
+        (27, 40),
+        (27, 40),
+    ),
+    FrequencyProfile(
+        "narrow_37_50",
+        "Narrow 37-50 Hz (All Zones)",
+        (37, 50),
+        (37, 50),
+        (37, 50),
+        (37, 50),
+    ),
+    FrequencyProfile(
+        "gradient_narrow",
+        "Gradient (Legs 15-23 / Mid 20-30 / Upper 27-40 / Head 37-50)",
+        (15, 23),
+        (20, 30),
+        (27, 40),
+        (37, 50),
+    ),
+    FrequencyProfile(
+        "inverted",
+        "Inverted (Legs 37-50 / Mid 27-40 / Upper 20-30 / Head 15-23)",
+        (37, 50),
+        (27, 40),
+        (20, 30),
+        (15, 23),
+    ),
+    FrequencyProfile(
+        "custom",
+        "Custom (Per Zone)",
+        (30, 40),
+        (50, 68),
+        (80, 100),
+        (100, 150),
+    ),
 ]
+
+# Hz limits for per-zone custom band controls in the UI.
+CUSTOM_FREQ_MIN_HZ = 15.0
+CUSTOM_FREQ_MAX_HZ = 300.0
+
+
+def build_custom_frequency_profile(
+    legs_band: tuple[float, float],
+    mid_band: tuple[float, float],
+    upper_mid_band: tuple[float, float],
+    head_band: tuple[float, float],
+) -> FrequencyProfile:
+    """Build a custom per-zone frequency profile from individual band ranges."""
+    return FrequencyProfile(
+        "custom",
+        (
+            f"Custom (Legs {legs_band[0]:.0f}-{legs_band[1]:.0f} / "
+            f"Mid {mid_band[0]:.0f}-{mid_band[1]:.0f} / "
+            f"Upper {upper_mid_band[0]:.0f}-{upper_mid_band[1]:.0f} / "
+            f"Head {head_band[0]:.0f}-{head_band[1]:.0f})"
+        ),
+        legs_band,
+        mid_band,
+        upper_mid_band,
+        head_band,
+    )
 
 _SPECIAL_SEGMENTATIONS: list[SegmentationPreset] = [
     SegmentationPreset(

@@ -112,10 +112,13 @@ class VibrationEngine:
         other: np.ndarray,
         synthetic_vibro: bool,
         synthetic_type_id: str = "sine",
+        bass_mono: np.ndarray | None = None,
+        drums_mono: np.ndarray | None = None,
+        other_mono: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
-        bass_mono = self._to_mono(bass)
-        drums_mono = self._to_mono(drums)
-        other_mono = self._to_mono(other)
+        bass_mono = bass_mono if bass_mono is not None else self._to_mono(bass)
+        drums_mono = drums_mono if drums_mono is not None else self._to_mono(drums)
+        other_mono = other_mono if other_mono is not None else self._to_mono(other)
         seg = self.segmentation
 
         legs_source = self._mix_stems(seg.legs_weights, bass_mono, drums_mono, other_mono)

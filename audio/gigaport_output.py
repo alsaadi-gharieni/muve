@@ -18,6 +18,8 @@ from audio.cinema_8d import (
 from audio.vibration_engine import VibrationEngine
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
+    FrequencyProfile,
+    build_custom_frequency_profile,
     get_frequency_profile,
     get_segmentation_preset,
 )
@@ -41,6 +43,69 @@ ZONE_TEST_DURATION_SEC = 0.65
 ZONE_TEST_LEVEL = 0.55
 
 
+def build_vibration_layers_from_stems(
+    sample_rate: int,
+    bass: np.ndarray,
+    drums: np.ndarray,
+    other: np.ndarray,
+    *,
+    synthetic_vibro: bool,
+    segmentation_id: str,
+    frequency_profile_id: str,
+    cinema_8d: bool,
+    synthetic_type_id: str = "sine",
+    custom_frequency_bands: dict[str, tuple[float, float]] | None = None,
+    bass_mono: np.ndarray | None = None,
+    drums_mono: np.ndarray | None = None,
+    other_mono: np.ndarray | None = None,
+    drum_impacts: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """CPU-heavy vibration layer build — safe to run off the UI thread."""
+    frequency_profile = GigaportOutput._resolve_frequency_profile(
+        frequency_profile_id,
+        custom_frequency_bands=custom_frequency_bands,
+    )
+    segmentation = get_segmentation_preset(segmentation_id)
+
+    vib = VibrationEngine(
+        sample_rate,
+        frequency_profile=frequency_profile,
+        segmentation=segmentation,
+    )
+    layers = vib.build_vibration_layers(
+        bass=bass,
+        drums=drums,
+        other=other,
+        synthetic_vibro=synthetic_vibro,
+        synthetic_type_id=synthetic_type_id,
+        bass_mono=bass_mono,
+        drums_mono=drums_mono,
+        other_mono=other_mono,
+    )
+
+    legs = layers["legs"]
+    mid = layers["mid"]
+    upper_mid = layers["upper_mid"]
+    head = layers["head"]
+
+    if cinema_8d:
+        if drum_impacts is None:
+            drums_mono = drums_mono if drums_mono is not None else to_mono(drums)
+            drum_impacts = drum_impact_envelope(drums_mono, sample_rate)
+        legs, mid, upper_mid, head = apply_8d_vibration_motion(
+            legs, mid, upper_mid, head, sample_rate, drum_impacts=drum_impacts
+        )
+
+    return (
+        legs,
+        mid,
+        upper_mid,
+        head,
+        layers["bass_energy"],
+        layers["generated_freq"],
+    )
+
+
 class GigaportOutput:
     """Manages synchronized 6-channel Satori playback (L, R, C, LFE, Ls, Rs)."""
 
@@ -57,14 +122,15 @@ class GigaportOutput:
         self.playhead = 0
         self.is_playing = False
         self.volume = 0.85
-        self.intensity_mid = 1.0
-        self.intensity_legs = 1.0
-        self.intensity_upper = 1.0
-        self.intensity_head = 1.0
+        self.intensity_mid = 1.4
+        self.intensity_legs = 1.4
+        self.intensity_upper = 1.4
+        self.intensity_head = 1.4
         self.cinema_8d_enabled = False
         self.speaker_program_raw: np.ndarray | None = None
         self.generated_freq_track: np.ndarray | None = None
         self.test_zone: str | None = None
+        self.test_frequency_hz = 35.0
         self.test_frames_left = 0
         self.test_phase = 0.0
 
@@ -87,7 +153,25 @@ class GigaportOutput:
                 devices.append({"index": idx, "name": dev["name"]})
         return devices
 
+    @staticmethod
+    def warm_up_audio_backend() -> None:
+        """Touch PortAudio once at startup so the first playback open is reliable."""
+        try:
+            sd.query_devices()
+        except (sd.PortAudioError, OSError):
+            pass
+
+    def has_vibration_layers(self) -> bool:
+        return (
+            self.vib_legs is not None
+            and self.vib_mid is not None
+            and self.vib_upper_mid is not None
+            and self.vib_head is not None
+        )
+
     def set_device(self, device_index: int) -> None:
+        if self.device_index == device_index and self.stream is not None:
+            return
         self.device_index = device_index
         self._close_stream()
 
@@ -111,12 +195,15 @@ class GigaportOutput:
         if head is not None:
             self.intensity_head = float(np.clip(head, 0.0, 3.0))
 
-    def trigger_zone_test(self, zone: str) -> None:
+    def trigger_zone_test(self, zone: str, frequency_hz: float | None = None) -> None:
         """Play a short sine pulse on one vibration zone (works without loaded audio)."""
         if zone not in ZONE_TEST_FREQUENCIES:
             raise ValueError(f"Unknown zone: {zone}")
         with self.lock:
             self.test_zone = zone
+            self.test_frequency_hz = (
+                float(frequency_hz) if frequency_hz is not None else ZONE_TEST_FREQUENCIES[zone]
+            )
             self.test_frames_left = int(self.sample_rate * ZONE_TEST_DURATION_SEC)
             self.test_phase = 0.0
         self._ensure_stream()
@@ -134,7 +221,7 @@ class GigaportOutput:
 
         zone = self.test_zone
         channel = ZONE_TEST_CHANNELS[zone]
-        freq = ZONE_TEST_FREQUENCIES[zone]
+        freq = self.test_frequency_hz
         total_test_frames = int(self.sample_rate * ZONE_TEST_DURATION_SEC)
         n = min(frames, self.test_frames_left)
 
@@ -168,6 +255,20 @@ class GigaportOutput:
         else:
             self.speaker_program = self.speaker_program_raw.copy()
 
+    @staticmethod
+    def _resolve_frequency_profile(
+        frequency_profile_id: str,
+        custom_frequency_bands: dict[str, tuple[float, float]] | None = None,
+    ) -> FrequencyProfile:
+        if frequency_profile_id == "custom" and custom_frequency_bands:
+            return build_custom_frequency_profile(
+                legs_band=custom_frequency_bands["legs"],
+                mid_band=custom_frequency_bands["mid"],
+                upper_mid_band=custom_frequency_bands["upper_mid"],
+                head_band=custom_frequency_bands["head"],
+            )
+        return get_frequency_profile(frequency_profile_id)
+
     def _build_vibration_layers(
         self,
         bass: np.ndarray,
@@ -178,44 +279,68 @@ class GigaportOutput:
         frequency_profile_id: str,
         cinema_8d: bool,
         synthetic_type_id: str = "sine",
+        custom_frequency_bands: dict[str, tuple[float, float]] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        frequency_profile = get_frequency_profile(frequency_profile_id)
-        segmentation = get_segmentation_preset(segmentation_id)
-
-        vib = VibrationEngine(
+        return build_vibration_layers_from_stems(
             self.sample_rate,
-            frequency_profile=frequency_profile,
-            segmentation=segmentation,
-        )
-        layers = vib.build_vibration_layers(
-            bass=bass,
-            drums=drums,
-            other=other,
+            bass,
+            drums,
+            other,
             synthetic_vibro=synthetic_vibro,
+            segmentation_id=segmentation_id,
+            frequency_profile_id=frequency_profile_id,
+            cinema_8d=cinema_8d,
             synthetic_type_id=synthetic_type_id,
+            custom_frequency_bands=custom_frequency_bands,
         )
 
-        legs = layers["legs"]
-        mid = layers["mid"]
-        upper_mid = layers["upper_mid"]
-        head = layers["head"]
+    def load_program_base(
+        self,
+        sample_rate: int,
+        original: np.ndarray,
+        cinema_8d: bool = False,
+        reset_playhead: bool = True,
+    ) -> None:
+        """Fast program setup without rebuilding vibration layers."""
+        original = ensure_stereo(original).astype(np.float32)
+        with self.lock:
+            self.sample_rate = sample_rate
+            self.cinema_8d_enabled = cinema_8d
+            self._set_speaker_program(original, cinema_8d=cinema_8d)
+            self.total_frames = len(self.speaker_program)
+            if reset_playhead:
+                self.playhead = 0
+                self.stats["progress_fraction"] = 0.0
+        self._close_stream()
 
-        if cinema_8d:
-            drums_mono = to_mono(drums)
-            impacts = drum_impact_envelope(drums_mono, self.sample_rate)
-            legs, mid, upper_mid, head = apply_8d_vibration_motion(
-                legs, mid, upper_mid, head, self.sample_rate, drum_impacts=impacts
-            )
-
-        # Return logical body zones (legs, mid, upper_mid, head).
-        return (
-            legs,
-            mid,
-            upper_mid,
-            head,
-            layers["bass_energy"],
-            layers["generated_freq"],
-        )
+    def apply_vibration_update(
+        self,
+        legs: np.ndarray,
+        mid: np.ndarray,
+        upper_mid: np.ndarray,
+        head: np.ndarray,
+        bass_energy: np.ndarray,
+        generated_freq: np.ndarray,
+        *,
+        cinema_8d: bool,
+        speaker_program: np.ndarray | None = None,
+        preserve_playhead: bool = True,
+        reset_playhead: bool = False,
+    ) -> None:
+        """Swap pre-built vibration layers without blocking audio for long."""
+        with self.lock:
+            saved_playhead = self.playhead
+            saved_progress = self.stats["progress_fraction"]
+            self.cinema_8d_enabled = cinema_8d
+            if speaker_program is not None:
+                self.speaker_program = speaker_program.astype(np.float32)
+            self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
+            if reset_playhead:
+                self.playhead = 0
+                self.stats["progress_fraction"] = 0.0
+            elif preserve_playhead:
+                self.playhead = min(saved_playhead, max(self.total_frames - 1, 0))
+                self.stats["progress_fraction"] = saved_progress
 
     def _set_vibration_layers(
         self,
@@ -254,6 +379,7 @@ class GigaportOutput:
         cinema_8d: bool = False,
         synthetic_type_id: str = "sine",
         reset_playhead: bool = True,
+        custom_frequency_bands: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         bass = ensure_stereo(bass)
         drums = ensure_stereo(drums)
@@ -270,20 +396,24 @@ class GigaportOutput:
             self.sample_rate = sample_rate
             self.cinema_8d_enabled = cinema_8d
             self._set_speaker_program(original, cinema_8d=cinema_8d)
-            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
-                bass=bass,
-                drums=drums,
-                other=other,
-                synthetic_vibro=synthetic_vibro,
-                segmentation_id=segmentation_id,
-                frequency_profile_id=frequency_profile_id,
-                cinema_8d=cinema_8d,
-                synthetic_type_id=synthetic_type_id,
-            )
-            self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
             if reset_playhead:
                 self.playhead = 0
                 self.stats["progress_fraction"] = 0.0
+
+        legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
+            bass=bass,
+            drums=drums,
+            other=other,
+            synthetic_vibro=synthetic_vibro,
+            segmentation_id=segmentation_id,
+            frequency_profile_id=frequency_profile_id,
+            cinema_8d=cinema_8d,
+            synthetic_type_id=synthetic_type_id,
+            custom_frequency_bands=custom_frequency_bands,
+        )
+
+        with self.lock:
+            self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
 
         self._close_stream()
 
@@ -297,6 +427,7 @@ class GigaportOutput:
         frequency_profile_id: str = "satori",
         cinema_8d: bool = False,
         synthetic_type_id: str = "sine",
+        custom_frequency_bands: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         if self.speaker_program is None:
             raise RuntimeError("Load a file before changing vibration presets")
@@ -313,23 +444,25 @@ class GigaportOutput:
         with self.lock:
             saved_playhead = self.playhead
             saved_progress = self.stats["progress_fraction"]
-
             self.cinema_8d_enabled = cinema_8d
             if cinema_8d and self.speaker_program_raw is not None:
                 self.speaker_program = apply_8d_stereo_pan(self.speaker_program_raw, self.sample_rate)
             elif self.speaker_program_raw is not None:
                 self.speaker_program = self.speaker_program_raw.copy()
 
-            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
-                bass=bass,
-                drums=drums,
-                other=other,
-                synthetic_vibro=synthetic_vibro,
-                segmentation_id=segmentation_id,
-                frequency_profile_id=frequency_profile_id,
-                cinema_8d=cinema_8d,
-                synthetic_type_id=synthetic_type_id,
-            )
+        legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
+            bass=bass,
+            drums=drums,
+            other=other,
+            synthetic_vibro=synthetic_vibro,
+            segmentation_id=segmentation_id,
+            frequency_profile_id=frequency_profile_id,
+            cinema_8d=cinema_8d,
+            synthetic_type_id=synthetic_type_id,
+            custom_frequency_bands=custom_frequency_bands,
+        )
+
+        with self.lock:
             self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
             self.playhead = min(saved_playhead, max(self.total_frames - 1, 0))
             self.stats["progress_fraction"] = saved_progress
@@ -360,20 +493,55 @@ class GigaportOutput:
         with self.lock:
             return dict(self.stats)
 
+    @staticmethod
+    def _is_transient_audio_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "library not found",
+                "unanticipated host error",
+                "error querying host api",
+                "auhal",
+            )
+        )
+
     def _ensure_stream(self) -> None:
         if self.stream is not None:
-            return
+            if not self.stream.active:
+                try:
+                    self.stream.start()
+                except (sd.PortAudioError, OSError):
+                    self._close_stream()
+                else:
+                    return
+            else:
+                return
 
-        self.stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=SATORI_OUTPUT_CHANNELS,
-            dtype="float32",
-            device=self.device_index,
-            blocksize=1024,
-            callback=self._callback,
-            latency="low",
-        )
-        self.stream.start()
+        last_error: BaseException | None = None
+        for attempt in range(3):
+            try:
+                self.stream = sd.OutputStream(
+                    samplerate=self.sample_rate,
+                    channels=SATORI_OUTPUT_CHANNELS,
+                    dtype="float32",
+                    device=self.device_index,
+                    blocksize=1024,
+                    callback=self._callback,
+                    latency="low",
+                )
+                self.stream.start()
+                return
+            except (sd.PortAudioError, OSError) as exc:
+                last_error = exc
+                self.stream = None
+                if attempt < 2 and self._is_transient_audio_error(exc):
+                    time.sleep(0.08 * (attempt + 1))
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
 
     def _close_stream(self) -> None:
         if self.stream is None:
@@ -392,14 +560,9 @@ class GigaportOutput:
 
         with self.lock:
             testing = self.test_frames_left > 0
-            can_play = (
-                self.is_playing
-                and self.speaker_program is not None
-                and self.vib_legs is not None
-                and self.vib_mid is not None
-                and self.vib_upper_mid is not None
-                and self.vib_head is not None
-            )
+            has_speakers = self.is_playing and self.speaker_program is not None
+            has_vibration = has_speakers and self.has_vibration_layers()
+            can_play = has_speakers
 
             if not testing and not can_play:
                 outdata.fill(0)
@@ -409,9 +572,9 @@ class GigaportOutput:
             output = np.zeros((block_len, SATORI_OUTPUT_CHANNELS), dtype=np.float32)
 
             if can_play:
+                total = self.total_frames if self.total_frames > 0 else len(self.speaker_program)
                 start = self.playhead
                 end = start + frames
-                total = self.total_frames
 
                 if start >= total:
                     outdata.fill(0)
@@ -425,18 +588,40 @@ class GigaportOutput:
 
                 sl = slice(start, min(end, total))
                 speakers = self.speaker_program[sl]
-                legs = self.vib_legs[sl]
-                mid = self.vib_mid[sl]
-                upper_mid = self.vib_upper_mid[sl]
-                head = self.vib_head[sl]
                 n = len(speakers)
 
                 output[:n, 0] = speakers[:, 0] * self.volume
                 output[:n, 1] = speakers[:, 1] * self.volume
-                output[:n, 2] = head * self.intensity_head
-                output[:n, 3] = upper_mid * self.intensity_upper
-                output[:n, 4] = legs * self.intensity_legs
-                output[:n, 5] = mid * self.intensity_mid
+
+                if has_vibration:
+                    legs = self.vib_legs[sl]
+                    mid = self.vib_mid[sl]
+                    upper_mid = self.vib_upper_mid[sl]
+                    head = self.vib_head[sl]
+                    output[:n, 2] = head * self.intensity_head
+                    output[:n, 3] = upper_mid * self.intensity_upper
+                    output[:n, 4] = legs * self.intensity_legs
+                    output[:n, 5] = mid * self.intensity_mid
+
+                    self.stats["rms_legs"] = float(np.sqrt(np.mean(legs**2) + 1e-10))
+                    self.stats["rms_mid"] = float(np.sqrt(np.mean(mid**2) + 1e-10))
+                    self.stats["rms_upper_mid"] = float(np.sqrt(np.mean(upper_mid**2) + 1e-10))
+                    self.stats["rms_head"] = float(np.sqrt(np.mean(head**2) + 1e-10))
+
+                    if self.bass_energy_track is not None:
+                        be_chunk = self.bass_energy_track[sl]
+                        if len(be_chunk) > 0:
+                            self.stats["bass_energy"] = float(np.mean(be_chunk))
+
+                    if self.generated_freq_track is not None:
+                        gf_chunk = self.generated_freq_track[sl]
+                        if len(gf_chunk) > 0:
+                            self.stats["generated_freq_hz"] = float(np.mean(gf_chunk))
+                else:
+                    self.stats["rms_legs"] = 0.0
+                    self.stats["rms_mid"] = 0.0
+                    self.stats["rms_upper_mid"] = 0.0
+                    self.stats["rms_head"] = 0.0
 
                 if block_len < frames:
                     output[block_len:].fill(0)
@@ -445,20 +630,6 @@ class GigaportOutput:
                     self.playhead = min(end, total)
 
                 self.stats["progress_fraction"] = self.playhead / max(total, 1)
-                self.stats["rms_legs"] = float(np.sqrt(np.mean(legs**2) + 1e-10))
-                self.stats["rms_mid"] = float(np.sqrt(np.mean(mid**2) + 1e-10))
-                self.stats["rms_upper_mid"] = float(np.sqrt(np.mean(upper_mid**2) + 1e-10))
-                self.stats["rms_head"] = float(np.sqrt(np.mean(head**2) + 1e-10))
-
-                if self.bass_energy_track is not None:
-                    be_chunk = self.bass_energy_track[sl]
-                    if len(be_chunk) > 0:
-                        self.stats["bass_energy"] = float(np.mean(be_chunk))
-
-                if self.generated_freq_track is not None:
-                    gf_chunk = self.generated_freq_track[sl]
-                    if len(gf_chunk) > 0:
-                        self.stats["generated_freq_hz"] = float(np.mean(gf_chunk))
 
             if testing:
                 output += self._render_zone_test_block(frames)

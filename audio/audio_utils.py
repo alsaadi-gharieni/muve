@@ -34,3 +34,15 @@ def resample_if_needed(data: np.ndarray, src_sr: int, target_sr: int) -> np.ndar
     up = target_sr // gcd
     down = src_sr // gcd
     return resample_poly(data, up, down, axis=0).astype(np.float32)
+
+
+def fit_frames(signal: np.ndarray, frames: int) -> np.ndarray:
+    """Trim or zero-pad a 1-D block to an exact frame count."""
+    flat = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if len(flat) == frames:
+        return flat
+    if len(flat) > frames:
+        return flat[:frames]
+    out = np.zeros(frames, dtype=np.float32)
+    out[: len(flat)] = flat
+    return out

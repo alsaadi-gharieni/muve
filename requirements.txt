@@ -3,3 +3,9 @@ numpy
 scipy
 sounddevice
 soundfile
+soundcard
+
+# Stem separation (Demucs primary, Spleeter fallback)
+demucs
+torchcodec
+spleeter

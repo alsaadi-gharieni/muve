@@ -55,8 +55,9 @@ def get_synthetic_type(type_id: str) -> SyntheticType:
     return SYNTHETIC_TYPES[0]
 
 
-def _energy_norm(energy: np.ndarray) -> np.ndarray:
-    return np.clip(energy / (np.max(energy) + 1e-7), 0.0, 1.0).astype(np.float32)
+def _energy_norm(energy: np.ndarray, reference_peak: float | None = None) -> np.ndarray:
+    peak = float(reference_peak) if reference_peak is not None else float(np.max(energy))
+    return np.clip(energy / (peak + 1e-7), 0.0, 1.0).astype(np.float32)
 
 
 def _smooth_track(signal: np.ndarray, window: int) -> np.ndarray:
@@ -69,15 +70,20 @@ def _prepare_energy(
     energy: np.ndarray,
     sample_rate: int,
     gentle: bool,
+    energy_reference_peak: float | None = None,
 ) -> np.ndarray:
     """Normalize and smooth energy so synthetic vibration follows musical swells, not noise."""
-    norm = _energy_norm(energy)
+    norm = _energy_norm(energy, reference_peak=energy_reference_peak)
     smooth_window = int(sample_rate * (0.14 if gentle else 0.05))
     norm = _smooth_track(norm, max(smooth_window, 2048 if gentle else 512))
     if gentle:
         # Fade out quiet sections; soften peaks for ambient/healing content.
         norm = np.clip((norm - 0.10) / 0.90, 0.0, 1.0)
         norm = norm**1.5
+    else:
+        # Gate low energy so loopback noise does not sustain a constant sine tone.
+        norm = np.clip((norm - 0.14) / 0.86, 0.0, 1.0)
+        norm = norm**1.25
     return norm.astype(np.float32)
 
 
@@ -116,10 +122,11 @@ def generate_synthetic_wave(
     synth_type_id: str,
     freq_range: tuple[float, float] | None = None,
     gentle: bool = False,
+    energy_reference_peak: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (waveform, dominant_freq_track)."""
     f_min, f_max = freq_range or (35.0, 50.0)
-    norm = _prepare_energy(energy, sample_rate, gentle)
+    norm = _prepare_energy(energy, sample_rate, gentle, energy_reference_peak=energy_reference_peak)
     n = len(energy)
     t = np.arange(n, dtype=np.float32) / float(sample_rate)
     peak = 0.52 if gentle else 0.82

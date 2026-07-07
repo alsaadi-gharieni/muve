@@ -27,6 +27,12 @@ from PyQt5.QtWidgets import (
 from sounddevice import PortAudioError
 
 from audio.gigaport_output import GigaportOutput
+from audio.live_input import (
+    LiveAudioEngine,
+    find_gigaport_loopback_device,
+    list_capture_devices,
+    pick_default_capture_device,
+)
 from audio.synthetic_types import SYNTHETIC_TYPES
 from audio.vibration_presets import (
     FREQUENCY_PROFILES,
@@ -96,6 +102,9 @@ class MainWindow(QMainWindow):
         self.resize(950, 760)
 
         self.engine = GigaportOutput()
+        self.live_engine = LiveAudioEngine()
+        self.live_active = False
+        self._live_silent_ticks = 0
         self.current_mix: Optional[PreparedMix] = None
         self.processing_worker: Optional[StemWorker] = None
         self.temp_dir = tempfile.mkdtemp(prefix="satori_vibro_")
@@ -110,6 +119,7 @@ class MainWindow(QMainWindow):
         self.timer.start()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._stop_live_audio()
         self.engine.stop()
         super().closeEvent(event)
 
@@ -137,6 +147,52 @@ class MainWindow(QMainWindow):
         top_controls.addWidget(self.refresh_devices_btn)
 
         main_layout.addLayout(top_controls)
+
+        live_box = QGroupBox("Bluetooth / Live Audio")
+        live_layout = QVBoxLayout(live_box)
+
+        live_device_row = QHBoxLayout()
+        self.capture_combo = QComboBox()
+        live_device_row.addWidget(QLabel("Phone / Input:"))
+        live_device_row.addWidget(self.capture_combo, 1)
+        self.refresh_capture_btn = QPushButton("Refresh")
+        self.refresh_capture_btn.clicked.connect(self._refresh_capture_devices)
+        live_device_row.addWidget(self.refresh_capture_btn)
+        live_layout.addLayout(live_device_row)
+
+        live_hint = QLabel(
+            "With AudioPlaybackConnector (APC): check 'APC plays L/R on Gigaport' below.\n"
+            "APC sends phone music to Gigaport speakers (ch 1–2). This app adds vibration (ch 3–6).\n"
+            "Pick ★ Gigaport [Speaker Loopback] as input. Start Live = vibration ON. Stop Live = vibration OFF.\n"
+            "(APC music keeps playing — only vibration stops.)"
+        )
+        live_hint.setWordWrap(True)
+        live_layout.addWidget(live_hint)
+
+        self.apc_overlay_checkbox = QCheckBox(
+            "APC / external router plays L+R on Gigaport (this app adds vibration only)"
+        )
+        self.apc_overlay_checkbox.toggled.connect(self._on_apc_overlay_toggled)
+        live_layout.addWidget(self.apc_overlay_checkbox)
+
+        self.live_signal_label = QLabel("")
+        self.live_signal_label.setWordWrap(True)
+        live_layout.addWidget(self.live_signal_label)
+
+        live_transport = QHBoxLayout()
+        self.live_start_btn = QPushButton("Start Live")
+        self.live_start_btn.clicked.connect(self._start_live_audio)
+        self.live_stop_btn = QPushButton("Stop Live")
+        self.live_stop_btn.clicked.connect(self._stop_live_audio)
+        self.live_stop_btn.setEnabled(False)
+        self.live_status_label = QLabel("Live audio: stopped")
+        live_transport.addWidget(self.live_start_btn)
+        live_transport.addWidget(self.live_stop_btn)
+        live_transport.addWidget(self.live_status_label, 1)
+        live_layout.addLayout(live_transport)
+
+        main_layout.addWidget(live_box)
+        self._refresh_capture_devices()
 
         self.progress_slider = QSlider()
         self.progress_slider.setOrientation(1)  # Qt.Horizontal
@@ -223,9 +279,9 @@ class MainWindow(QMainWindow):
             slider = QSlider()
             slider.setOrientation(1)
             slider.setRange(0, 300)
-            slider.setValue(50)
+            slider.setValue(100)
             slider.valueChanged.connect(lambda value, z=zone_id: self._set_zone_intensity(z, value))
-            label = QLabel("50%")
+            label = QLabel("100%")
             self.zone_sliders[zone_id] = slider
             self.zone_labels[zone_id] = label
             vibro_layout.addWidget(QLabel(f"{zone_name}:"), row, 0)
@@ -284,8 +340,61 @@ class MainWindow(QMainWindow):
 
     def _refresh_devices(self) -> None:
         self.device_combo.clear()
-        for device in self.engine.list_output_devices(min_channels=6):
-            self.device_combo.addItem(f"{device['name']} ({device['index']})", device["index"])
+        devices = self.engine.list_output_devices(min_channels=6)
+        if not devices:
+            self.device_combo.addItem(
+                "No 6-channel device found — install Gigaport ASIO driver, reconnect USB, restart app",
+                None,
+            )
+            return
+        for device in devices:
+            tag = " ★ Gigaport" if device.get("is_gigaport") else ""
+            label = (
+                f"{device['name']}{tag} "
+                f"({device['channels']} ch, {device['hostapi']}, #{device['index']})"
+            )
+            self.device_combo.addItem(label, device["index"])
+
+    def _on_apc_overlay_toggled(self, enabled: bool) -> None:
+        if enabled:
+            gigaport_loopback = find_gigaport_loopback_device()
+            if gigaport_loopback is not None:
+                for i in range(self.capture_combo.count()):
+                    if self.capture_combo.itemData(i) == gigaport_loopback:
+                        self.capture_combo.setCurrentIndex(i)
+                        break
+            self.live_signal_label.setText(
+                "APC mode: capture Gigaport loopback, output vibration to ch 3–6 only."
+            )
+        else:
+            self.live_signal_label.setText("")
+
+    def _refresh_capture_devices(self) -> None:
+        self.capture_combo.clear()
+        for device in list_capture_devices():
+            if device.get("is_default_playback"):
+                prefix = "★ DEFAULT "
+            elif device.get("is_bluetooth") and device.get("backend") == "soundcard":
+                prefix = "★ Phone/BT "
+            elif device.get("backend") == "soundcard":
+                prefix = "★ "
+            elif device.get("is_stereo_bluetooth"):
+                prefix = "BT Stereo "
+            elif device.get("loopback"):
+                prefix = "Loopback "
+            elif device.get("is_bluetooth"):
+                prefix = "BT "
+            else:
+                prefix = ""
+            label = f"{prefix}{device['name']} ({device.get('index', 'loopback')})"
+            self.capture_combo.addItem(label, device)
+
+        default_dev = pick_default_capture_device()
+        if default_dev is not None:
+            for i in range(self.capture_combo.count()):
+                if self.capture_combo.itemData(i) == default_dev:
+                    self.capture_combo.setCurrentIndex(i)
+                    break
 
     def _get_vibration_preset_ids(self) -> tuple[str, str]:
         return (
@@ -362,6 +471,7 @@ class MainWindow(QMainWindow):
         self._update_preset_summary()
 
     def _pick_file(self) -> None:
+        self._stop_live_audio()
         source, _ = QFileDialog.getOpenFileName(
             self,
             "Select Audio File",
@@ -423,24 +533,29 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(enabled)
 
     def _set_volume(self, value: int) -> None:
-        self.engine.set_volume(value / 100.0)
+        volume = value / 100.0
+        self.engine.set_volume(volume)
+        self.live_engine.set_volume(volume)
+
+    def _zone_intensity_values(self) -> dict[str, float]:
+        return {
+            "mid": self.zone_sliders["mid"].value() / 100.0,
+            "legs": self.zone_sliders["legs"].value() / 100.0,
+            "upper": self.zone_sliders["upper"].value() / 100.0,
+            "head": self.zone_sliders["head"].value() / 100.0,
+        }
+
+    def _apply_zone_intensities(self) -> None:
+        values = self._zone_intensity_values()
+        self.engine.set_zone_intensities(**values)
+        self.live_engine.set_zone_intensities(**values)
 
     def _sync_zone_intensities_to_engine(self) -> None:
-        self.engine.set_zone_intensities(
-            mid=self.zone_sliders["mid"].value() / 100.0,
-            legs=self.zone_sliders["legs"].value() / 100.0,
-            upper=self.zone_sliders["upper"].value() / 100.0,
-            head=self.zone_sliders["head"].value() / 100.0,
-        )
+        self._apply_zone_intensities()
 
     def _set_zone_intensity(self, zone_id: str, value: int) -> None:
         self.zone_labels[zone_id].setText(f"{value}%")
-        self.engine.set_zone_intensities(
-            mid=self.zone_sliders["mid"].value() / 100.0,
-            legs=self.zone_sliders["legs"].value() / 100.0,
-            upper=self.zone_sliders["upper"].value() / 100.0,
-            head=self.zone_sliders["head"].value() / 100.0,
-        )
+        self._apply_zone_intensities()
 
     def _test_zone(self, zone_id: str) -> None:
         if self.device_combo.currentIndex() < 0:
@@ -467,11 +582,113 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Playback Error", str(exc))
 
     def _reload_mix_in_engine(self) -> None:
+        if self.live_active:
+            segmentation_id, frequency_id = self._get_vibration_preset_ids()
+            self.live_engine.update_presets(
+                segmentation_id,
+                frequency_id,
+                synthetic_vibro=self.synthetic_checkbox.isChecked(),
+                synthetic_type_id=self.synthetic_type_combo.currentData(),
+            )
         if self.current_mix is None:
             self._update_preset_summary()
             return
 
         self._prepare_engine_mix(self.current_mix, initial_load=False)
+
+    def _start_live_audio(self) -> None:
+        if self.capture_combo.currentIndex() < 0:
+            QMessageBox.warning(self, "No Input", "Select a phone / Bluetooth input device first.")
+            return
+        if self.device_combo.currentIndex() < 0:
+            QMessageBox.warning(self, "No Output", "Select a 6-channel output device first.")
+            return
+        output_index = self.device_combo.currentData()
+        if output_index is None:
+            QMessageBox.warning(
+                self,
+                "Gigaport Not Found",
+                "No 6-channel output device is available.\n\n"
+                "On Windows:\n"
+                "1. Connect Gigaport eX via USB\n"
+                "2. Install the Gigaport ASIO driver from ESI\n"
+                "3. Close and restart this app (ASIO is enabled at startup)\n"
+                "4. Click Refresh Devices — look for 'Gigaport' with ASIO and 6+ channels",
+            )
+            return
+
+        capture = self.capture_combo.currentData()
+        segmentation_id, frequency_id = self._get_vibration_preset_ids()
+
+        self.engine.stop()
+        self.engine.release_output_device()
+        self.live_engine.set_volume(self.volume_slider.value() / 100.0)
+        self._apply_zone_intensities()
+
+        vibration_overlay = self.apc_overlay_checkbox.isChecked()
+        if vibration_overlay:
+            gigaport_lb = find_gigaport_loopback_device()
+            if gigaport_lb is not None:
+                capture = gigaport_lb
+
+        try:
+            self.live_engine.start(
+                capture_device=capture,
+                output_device_index=output_index,
+                loopback=bool(capture.get("loopback")),
+                capture_channels=int(capture.get("channels", 2)),
+                segmentation_id=segmentation_id,
+                frequency_profile_id=frequency_id,
+                synthetic_vibro=self.synthetic_checkbox.isChecked(),
+                synthetic_type_id=self.synthetic_type_combo.currentData(),
+                vibration_overlay=vibration_overlay,
+            )
+        except (PortAudioError, RuntimeError, OSError) as exc:
+            extra = ""
+            if vibration_overlay:
+                extra = (
+                    "\n\nAPC mode: ensure AudioPlaybackConnector is playing to Gigaport, "
+                    "and Gigaport ASIO driver is installed. If this fails, APC may have "
+                    "exclusive control — try closing APC and use full app mode instead."
+                )
+            QMessageBox.critical(
+                self,
+                "Live Audio Error",
+                f"{exc}{extra}",
+            )
+            return
+
+        self.live_active = True
+        self._live_silent_ticks = 0
+        self.live_signal_label.setText("Checking for audio signal...")
+        self.live_start_btn.setEnabled(False)
+        self.live_stop_btn.setEnabled(True)
+        self.pick_button.setEnabled(False)
+        self.play_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.live_status_label.setText(
+            f"Live vibration: ON ({'APC overlay' if vibration_overlay else 'full 6ch'})"
+        )
+        self.file_label.setText(
+            "Live vibration active — Stop Live stops vibration only"
+            if vibration_overlay
+            else "Live Bluetooth / phone audio active"
+        )
+
+    def _stop_live_audio(self) -> None:
+        if not self.live_active and not self.live_engine.is_active:
+            return
+        self.live_engine.stop()
+        self.live_active = False
+        self._live_silent_ticks = 0
+        self.live_start_btn.setEnabled(True)
+        self.live_stop_btn.setEnabled(False)
+        self.live_status_label.setText("Live vibration: OFF")
+        self.live_signal_label.setText("")
+        self._set_controls_enabled(True)
+        if self.current_mix is None:
+            self.file_label.setText("No file loaded")
 
     def _on_slider_pressed(self) -> None:
         self._slider_being_dragged = True
@@ -482,9 +699,30 @@ class MainWindow(QMainWindow):
         self.engine.set_position_fraction(frac)
 
     def _refresh_runtime_ui(self) -> None:
-        stats = self.engine.get_runtime_stats()
-        if not self._slider_being_dragged:
+        stats = self.live_engine.get_runtime_stats() if self.live_active else self.engine.get_runtime_stats()
+        if not self._slider_being_dragged and not self.live_active:
             self.progress_slider.setValue(int(stats["progress_fraction"] * 1000.0))
+
+        if self.live_active:
+            input_rms = stats.get("input_rms", 0.0)
+            if input_rms > 0.002:
+                self._live_silent_ticks = 0
+                self.live_signal_label.setText(
+                    f"✓ Receiving audio (input level {input_rms:.3f}) — vibration should be active on Gigaport."
+                )
+            else:
+                self._live_silent_ticks += 1
+                if self._live_silent_ticks > 15:
+                    if self.apc_overlay_checkbox.isChecked():
+                        self.live_signal_label.setText(
+                            "✗ No signal on Gigaport loopback. Check APC is playing to Gigaport, "
+                            "then pick ★ Gigaport [Speaker Loopback] and click Refresh."
+                        )
+                    else:
+                        self.live_signal_label.setText(
+                            "✗ NO AUDIO on this speaker. Music may be routed elsewhere.\n"
+                            "With APC: enable 'APC plays L+R on Gigaport' checkbox above."
+                        )
 
         self.legs_rms_label.setText(f"Legs RMS (Ls): {stats['rms_legs']:.3f}")
         self.mid_rms_label.setText(f"Mid RMS (Rs): {stats['rms_mid']:.3f}")

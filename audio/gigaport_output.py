@@ -81,10 +81,34 @@ class GigaportOutput:
         }
 
     def list_output_devices(self, min_channels: int = SATORI_OUTPUT_CHANNELS) -> list[dict[str, Any]]:
-        devices = []
+        devices: list[dict[str, Any]] = []
+        hostapis = sd.query_hostapis()
         for idx, dev in enumerate(sd.query_devices()):
-            if int(dev["max_output_channels"]) >= min_channels:
-                devices.append({"index": idx, "name": dev["name"]})
+            out_ch = int(dev["max_output_channels"])
+            if out_ch <= 0:
+                continue
+            name = str(dev["name"])
+            is_gigaport = "gigaport" in name.lower()
+            if out_ch < min_channels and not is_gigaport:
+                continue
+            api_name = str(hostapis[int(dev["hostapi"])]["name"])
+            devices.append(
+                {
+                    "index": idx,
+                    "name": name,
+                    "channels": out_ch,
+                    "hostapi": api_name,
+                    "is_gigaport": is_gigaport,
+                }
+            )
+        devices.sort(
+            key=lambda d: (
+                not d.get("is_gigaport", False),
+                "asio" not in d.get("hostapi", "").lower(),
+                -int(d.get("channels", 0)),
+                d["name"].lower(),
+            )
+        )
         return devices
 
     def set_device(self, device_index: int) -> None:
@@ -349,6 +373,11 @@ class GigaportOutput:
             self.playhead = 0
             self.stats["progress_fraction"] = 0.0
             self._cancel_zone_test()
+
+    def release_output_device(self) -> None:
+        """Close the ASIO/output stream so another engine can open Gigaport."""
+        self.is_playing = False
+        self._close_stream()
 
     def set_position_fraction(self, fraction: float) -> None:
         with self.lock:

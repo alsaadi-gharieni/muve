@@ -29,6 +29,14 @@ from windows_cable import ensure_cable_default_playback
 _gigaport = GigaportOutput()
 _live_engine = LiveAudioEngine()
 
+# Demo shares this engine so Start Live / Demo never fight over ASIO.
+try:
+    import demo_audio as _demo_audio
+
+    _demo_audio.bind_engine(_live_engine, _gigaport)
+except Exception:  # noqa: BLE001
+    pass
+
 
 def _log_input_devices() -> None:
     """Print PortAudio inputs so we can see Behringer naming on the tablet."""

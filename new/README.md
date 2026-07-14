@@ -5,11 +5,12 @@ Same as old app. New UI + Bluetooth + optional AUX.
 ## Modes (automatic on Play)
 
 ### 1) Bluetooth (priority when connected in app)
-- **Find nearby** — AssociationEndpoint inquiry for unpaired phones (in-app list)
+- **Scan** — finds nearby unpaired phones (AssociationEndpoint inquiry)
 - **Pair** — `DeviceInformationCustomPairing` with `CONFIRM_ONLY` (confirm on phone when prompted)
-- **Scan** — lists already-paired phones via `AudioPlaybackConnection.GetDeviceSelector()`
-- **Connect** — `TryCreateFromId` → `StartAsync` → `OpenAsync` (APC flow, unchanged)
-- **Disconnect & forget** closes the link and unpairs for the next guest
+- **Paired phones** refresh automatically (no separate Scan for already-paired)
+- **Connect** — `TryCreateFromId` → `StartAsync` → `OpenAsync` (APC flow)
+- **Disconnect** closes the audio link only (pairing kept)
+- **Forget** / **Forget all** call Windows `UnpairAsync` (real remove from Bluetooth)
 - App sets default playback to **CABLE Input**, captures CABLE → **Gigaport ASIO**
 - Song title / seek are not available for phone→PC Bluetooth (Windows limitation)
 - While Live is on, the timer shows **session elapsed** (`LIVE`)
@@ -33,7 +34,12 @@ Console:
 [live_audio] mode=aux capture='…Behringer…' output='…ASIO…Gigaport…'
 ```
 
-## Run
+## 3) Demo tab
+- Plays **`assets/demo.wav`** through the **same Live → Gigaport** path (audio ch1–2 + vibration ch3–6)
+- Same volume / vibration / bass-cutoff controls as Now Playing
+- Seek / restart work on the demo file
+- Starting Demo stops Live (and vice versa) so ASIO isn’t contested
+
 
 **Easiest fix for WinRT errors on the tablet:** double-click `install_winrt.bat` in `D:\muvi_new`, wait for `SUCCESS`, then:
 

@@ -144,6 +144,99 @@ class EngineBridge:
                 "mode": mode,
             }
 
+    def start_demo(
+        self,
+        volume: float = 0.70,
+        vibration: float = 0.27,
+        cutoff_hz: float = 200.0,
+        highpass_hz: float | None = None,
+        path: str | None = None,
+        loop: bool = True,
+    ) -> dict[str, Any]:
+        """Play assets/demo.wav through the same Gigaport vibration path."""
+        with self._lock:
+            try:
+                self._kill_worker()
+                if highpass_hz is not None:
+                    cutoff_hz = float(highpass_hz)
+                msg: dict[str, Any] = {
+                    "cmd": "start_demo",
+                    "volume": float(volume),
+                    "vibration": float(vibration),
+                    "cutoff_hz": float(cutoff_hz),
+                    "loop": bool(loop),
+                }
+                if path:
+                    msg["path"] = path
+                result = self._send(msg)
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = str(exc)
+                self._running = False
+                self._kill_worker()
+                return {"ok": False, "error": str(exc)}
+
+            if not result.get("ok"):
+                err = str(result.get("error") or "demo start failed")
+                if "asio" in err.lower():
+                    err = (
+                        "ASIO failed in audio worker. Close APC and the old muve app, "
+                        "then Play again. "
+                        f"({err})"
+                    )
+                self.last_error = err
+                self._running = False
+                return {"ok": False, "error": err}
+
+            self.capture_name = result.get("capture")
+            self.output_index = result.get("output_index")
+            self.output_name = result.get("output_name")
+            self._running = True
+            self.last_error = None
+            print(
+                f"[engine_bridge] START DEMO ok — file={self.capture_name!r} "
+                f"output={self.output_name}"
+            )
+            return {
+                "ok": True,
+                "capture": self.capture_name,
+                "output_index": self.output_index,
+                "output_name": self.output_name,
+                "mode": "demo",
+                "duration": result.get("duration"),
+                "title": result.get("title"),
+                "artist": result.get("artist"),
+                "album": result.get("album"),
+                "path": result.get("path"),
+            }
+
+    def get_demo_progress(self) -> dict[str, float]:
+        with self._lock:
+            if not self._running:
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+            try:
+                result = self._send({"cmd": "demo_progress"})
+                return {
+                    "position": float(result.get("position") or 0.0),
+                    "duration": float(result.get("duration") or 0.0),
+                    "fraction": float(result.get("fraction") or 0.0),
+                }
+            except Exception:  # noqa: BLE001
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+
+    def seek_demo(self, seconds: float) -> dict[str, float]:
+        with self._lock:
+            if not self._running:
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+            try:
+                result = self._send({"cmd": "seek_demo", "seconds": float(seconds)})
+                return {
+                    "position": float(result.get("position") or 0.0),
+                    "duration": float(result.get("duration") or 0.0),
+                    "fraction": float(result.get("fraction") or 0.0),
+                }
+            except Exception:  # noqa: BLE001
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+
     def start(self) -> dict[str, Any]:
         return self.start_live()
 

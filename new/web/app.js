@@ -7,51 +7,76 @@ const el = (id) => document.getElementById(id);
 const MockApi = (() => {
   const state = {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
+    live_mode: null,
     track: { title: "Weightless", artist: "Marconi Union", album: "Ambient Transmissions", duration: 486, artwork: "assets/artwork.svg" },
     bluetooth: {
       connected_id: null, connecting_id: null, scanning: false,
-      discovering: false, pairing_id: null, error: null, supported: false,
+      discovering: false, pairing_id: null, forgetting: false, error: null, supported: false,
     },
     media: { ok: true, can_seek: true, can_prev: true, can_next: true },
+    demo: { available: true, error: null },
     devices: [],
     nearby_devices: [],
   };
   let last = performance.now();
   const snap = () => {
     const now = performance.now();
-    if (state.media.ok) state.position = Math.min(state.track.duration, state.position + (now - last) / 1000);
+    if (state.playing && state.live_mode === "demo") {
+      state.position = Math.min(state.track.duration || 30, state.position + (now - last) / 1000);
+    } else if (state.media.ok) {
+      state.position = Math.min(state.track.duration, state.position + (now - last) / 1000);
+    }
     last = now;
     return JSON.parse(JSON.stringify(state));
   };
   return {
     get_state: async () => snap(),
-    toggle_play: async () => { state.playing = !state.playing; last = performance.now(); return snap(); },
-    seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
-    previous_track: async () => { state.position = 0; return snap(); },
-    next_track: async () => { state.position = 0; state.track.title = "Next Track"; return snap(); },
-    set_volume: async (v) => { state.volume = v; return snap(); },
-    set_vibration: async (v) => { state.vibration = v; return snap(); },
-    set_highpass_hz: async (v) => { state.highpass_hz = v; return snap(); },
-    scan_bluetooth: async () => {
-      state.bluetooth.scanning = true;
-      state.devices = [];
-      setTimeout(() => {
-        state.bluetooth.scanning = false;
-        state.bluetooth.error = "No paired Bluetooth audio devices found.";
-      }, 800);
+    toggle_play: async () => {
+      if (state.playing && state.live_mode === "demo") {
+        state.playing = false;
+        state.live_mode = null;
+      } else {
+        state.playing = !state.playing;
+        state.live_mode = state.playing ? "cable" : null;
+      }
+      last = performance.now();
       return snap();
     },
-    discover_nearby: async () => {
+    toggle_demo_play: async () => {
+      const on = !(state.playing && state.live_mode === "demo");
+      state.playing = on;
+      state.live_mode = on ? "demo" : null;
+      if (on) {
+        state.track = {
+          title: "Demo", artist: "MUVI test track", album: "assets/demo.wav",
+          duration: 30, artwork: "assets/artwork.svg",
+        };
+        state.position = 0;
+        state.media = { ok: true, can_seek: true, can_prev: true, can_next: true, via: "demo" };
+      }
+      last = performance.now();
+      return snap();
+    },
+    seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
+    previous_track: async () => { state.position = 0; return snap(); },
+    next_track: async () => { state.position = 0; if (state.live_mode !== "demo") state.track.title = "Next Track"; return snap(); },
+    set_volume: async (v) => { state.volume = v; return snap(); },
+    set_vibration: async (v) => { state.vibration = v; return snap(); },
+    set_highpass_hz: async (v) => { state.highpass_hz = v; state.cutoff_hz = v; return snap(); },
+    scan_bluetooth: async () => {
+      state.bluetooth.scanning = true;
       state.bluetooth.discovering = true;
       state.nearby_devices = [];
       setTimeout(() => {
+        state.bluetooth.scanning = false;
         state.bluetooth.discovering = false;
         state.nearby_devices = [
-          { id: "demo-nearby", name: "Demo Phone", profile: "Nearby — tap Pair", paired: false, nearby: true, kind: "phone" },
+          { id: "demo-nearby", name: "Demo Phone", profile: "Nearby — tap Pair", paired: false, nearby: true, can_pair: true, kind: "phone" },
         ];
       }, 900);
       return snap();
     },
+    discover_nearby: async () => MockApi.scan_bluetooth(),
     pair_device: async (id) => {
       state.bluetooth.pairing_id = id;
       setTimeout(() => {
@@ -78,6 +103,31 @@ const MockApi = (() => {
       state.bluetooth.connected_id = null;
       state.bluetooth.connecting_id = null;
       state.playing = false;
+      state.live_mode = null;
+      return snap();
+    },
+    forget_device: async (id) => {
+      state.bluetooth.forgetting = true;
+      setTimeout(() => {
+        state.bluetooth.forgetting = false;
+        state.bluetooth.connected_id = null;
+        state.devices = (state.devices || []).filter((d) => d.id !== id);
+        state.bluetooth.error = "Device forgotten from Windows.";
+      }, 700);
+      return snap();
+    },
+    forget_all_devices: async () => {
+      state.bluetooth.forgetting = true;
+      setTimeout(() => {
+        state.bluetooth.forgetting = false;
+        state.bluetooth.connected_id = null;
+        state.devices = [];
+        state.bluetooth.error = "Forgot all paired Bluetooth devices from Windows.";
+      }, 900);
+      return snap();
+    },
+    clear_bluetooth_alert: async () => {
+      state.bluetooth.alert = null;
       return snap();
     },
   };
@@ -103,10 +153,13 @@ const deviceIcon = (kind) =>
     : '<svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 18h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
 let seeking = false;
+let demoSeeking = false;
 let playClickLock = false;
+let demoPlayClickLock = false;
 let lastState = { playing: false };
 let lastDevicesSig = "";
 let lastNearbySig = "";
+let lastBtAlert = "";
 
 // Bass cutoff UI: 0% = deepest (40 Hz), 100% = brightest (250 Hz). Default 76% ≈ 200 Hz.
 const CUTOFF_HZ_MIN = 40;
@@ -119,27 +172,51 @@ const cutoffHzToPct = (hz) =>
       (CUTOFF_HZ_MAX - CUTOFF_HZ_MIN))
   );
 
+function isDemoPlaying(s) {
+  return Boolean(s && s.playing && s.live_mode === "demo");
+}
+function isLivePlaying(s) {
+  return Boolean(s && s.playing && s.live_mode !== "demo");
+}
+
+const busyIcon = '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.35"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+const pauseIcon = '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/>';
+const playIconSvg = '<path d="M8 5v14l11-7z" fill="currentColor"/>';
+
 // ------------------------------------------------------------------ render --
 function render(s) {
   if (!s) return;
   lastState = s;
-  // Now playing
-  el("npTitle").textContent = s.track.title;
-  el("npArtist").textContent = s.track.artist;
-  el("npAlbum").textContent = s.track.album;
-  el("npArt").src = s.track.artwork;
+  // Pop pairing guidance once (e.g. status 19 FAILED → forget on phone).
+  const alertMsg = s.bluetooth && s.bluetooth.alert;
+  if (alertMsg && alertMsg !== lastBtAlert) {
+    lastBtAlert = alertMsg;
+    window.alert(alertMsg);
+    if (api.clear_bluetooth_alert) {
+      Promise.resolve(api.clear_bluetooth_alert()).catch(() => {});
+    }
+  } else if (!alertMsg) {
+    lastBtAlert = "";
+  }
 
+  const liveOn = isLivePlaying(s);
+  const demoOn = isDemoPlaying(s);
   const busy = Boolean(s.play_busy) || playClickLock;
+  const demoBusy = Boolean(s.play_busy) || demoPlayClickLock;
+
+  // Now playing (Live / AUX / Bluetooth only)
+  el("npTitle").textContent = demoOn ? "Ready" : s.track.title;
+  el("npArtist").textContent = demoOn ? "Phone audio" : s.track.artist;
+  el("npAlbum").textContent = demoOn
+    ? "AUX: plug in → Play · Bluetooth: Connect → play phone → Play"
+    : s.track.album;
+  el("npArt").src = s.track.artwork || "assets/artwork.svg";
+
   const playBtn = el("playBtn");
   playBtn.disabled = busy;
   playBtn.classList.toggle("busy", busy);
   playBtn.setAttribute("aria-busy", busy ? "true" : "false");
-
-  el("playIcon").innerHTML = busy
-    ? '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.35"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
-    : s.playing
-      ? '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/>'
-      : '<path d="M8 5v14l11-7z" fill="currentColor"/>';
+  el("playIcon").innerHTML = busy ? busyIcon : (liveOn ? pauseIcon : playIconSvg);
 
   const connected = (s.devices || []).find((d) => d.id === s.bluetooth.connected_id);
   const online = Boolean(connected);
@@ -152,11 +229,11 @@ function render(s) {
   if (hint) {
     const capture = String(s.capture_name || "");
     const isAux = /behringer|umc|usb audio|line/i.test(capture);
-    if (busy) {
-      hint.textContent = s.playing ? "Stopping…" : "Starting Live — please wait…";
-    } else if (s.engine_error) {
+    if (busy && !demoOn) {
+      hint.textContent = liveOn ? "Stopping…" : "Starting Live — please wait…";
+    } else if (s.engine_error && !demoOn) {
       hint.textContent = `Live failed: ${s.engine_error}`;
-    } else if (s.playing) {
+    } else if (liveOn) {
       const rms = Number(s.input_rms || 0);
       const waiting = isAux
         ? "no AUX signal — play music on the phone"
@@ -170,23 +247,22 @@ function render(s) {
   }
 
   if (!seeking) {
-    const frac = s.track.duration ? s.position / s.track.duration : 0;
+    const frac = (!demoOn && s.track.duration) ? s.position / s.track.duration : 0;
     el("seek").value = Math.round(Math.max(0, Math.min(1, frac)) * 1000);
   }
-  el("timeCur").textContent = fmtTime(s.position);
-  el("timeDur").textContent = Number(s.track.duration) > 0 ? fmtTime(s.track.duration) : "LIVE";
+  el("timeCur").textContent = fmtTime(demoOn ? 0 : s.position);
+  el("timeDur").textContent = (!demoOn && Number(s.track.duration) > 0) ? fmtTime(s.track.duration) : "LIVE";
 
   const media = s.media || {};
-  const hasTimeline = Boolean(media.ok) && Number(s.track.duration) > 0;
+  const hasTimeline = !demoOn && Boolean(media.ok) && Number(s.track.duration) > 0;
   const seekEl = el("seek");
   seekEl.disabled = !hasTimeline;
   seekEl.classList.toggle("disabled", seekEl.disabled);
   const prevBtn = el("prevBtn");
   const nextBtn = el("nextBtn");
-  // Prev/next enabled when BT is connected or SMTC says so (media keys).
   const btConnected = Boolean(s.bluetooth && s.bluetooth.connected_id);
-  prevBtn.disabled = !(media.can_prev || btConnected);
-  nextBtn.disabled = !(media.can_next || btConnected);
+  prevBtn.disabled = demoOn || !(media.can_prev || btConnected);
+  nextBtn.disabled = demoOn || !(media.can_next || btConnected);
   prevBtn.classList.toggle("disabled", prevBtn.disabled);
   nextBtn.classList.toggle("disabled", nextBtn.disabled);
 
@@ -198,20 +274,79 @@ function render(s) {
   el("highpass").value = cutoffPct;
   el("hpVal").textContent = `${cutoffPct}%`;
 
-  // Bottom-left status: AUX Live, Bluetooth name, or idle
+  // Demo screen (same controls, demo.wav)
+  if (el("demoTitle")) {
+    const demoTrack = demoOn
+      ? s.track
+      : { title: "Demo", artist: "MUVI test track", album: "assets/demo.wav", duration: s.track?.duration || 0, artwork: "assets/artwork.svg" };
+    el("demoTitle").textContent = demoTrack.title || "Demo";
+    el("demoArtist").textContent = demoTrack.artist || "MUVI test track";
+    el("demoAlbum").textContent = demoTrack.album || "assets/demo.wav";
+    el("demoArt").src = demoTrack.artwork || "assets/artwork.svg";
+
+    const demoPlayBtn = el("demoPlayBtn");
+    demoPlayBtn.disabled = demoBusy;
+    demoPlayBtn.classList.toggle("busy", demoBusy);
+    el("demoPlayIcon").innerHTML = demoBusy ? busyIcon : (demoOn ? pauseIcon : playIconSvg);
+
+    if (!demoSeeking) {
+      const dFrac = demoOn && s.track.duration ? s.position / s.track.duration : 0;
+      el("demoSeek").value = Math.round(Math.max(0, Math.min(1, dFrac)) * 1000);
+    }
+    el("demoTimeCur").textContent = fmtTime(demoOn ? s.position : 0);
+    el("demoTimeDur").textContent = Number(demoOn ? s.track.duration : 0) > 0
+      ? fmtTime(s.track.duration)
+      : (demoOn ? fmtTime(s.track.duration || 0) : "—");
+
+    const demoSeekEl = el("demoSeek");
+    demoSeekEl.disabled = !demoOn;
+    demoSeekEl.classList.toggle("disabled", demoSeekEl.disabled);
+    el("demoPrevBtn").disabled = !demoOn;
+    el("demoNextBtn").disabled = !demoOn;
+    el("demoPrevBtn").classList.toggle("disabled", !demoOn);
+    el("demoNextBtn").classList.toggle("disabled", !demoOn);
+
+    el("demoVolume").value = Math.round(s.volume * 100);
+    el("demoVolVal").textContent = `${Math.round(s.volume * 100)}%`;
+    el("demoVibration").value = Math.round(s.vibration * 100);
+    el("demoVibVal").textContent = `${Math.round(s.vibration * 100)}%`;
+    el("demoHighpass").value = cutoffPct;
+    el("demoHpVal").textContent = `${cutoffPct}%`;
+
+    const demoHint = el("demoHint");
+    if (demoHint) {
+      if (demoBusy) {
+        demoHint.textContent = demoOn ? "Stopping…" : "Starting demo — please wait…";
+      } else if (s.demo && s.demo.error) {
+        demoHint.textContent = `Demo failed: ${s.demo.error}`;
+      } else if (demoOn) {
+        const out = s.output_name ? ` → ${s.output_name}` : "";
+        demoHint.textContent = `Demo ON · demo.wav${out}`;
+      } else if (s.demo && s.demo.available === false) {
+        demoHint.textContent = "demo.wav not found in assets/";
+      } else {
+        demoHint.textContent = "";
+      }
+    }
+  }
+
+  // Bottom-left status: AUX Live, Bluetooth name, Demo, or idle
   const sidebarConn = el("sidebarConn");
   const mode = s.live_mode || "";
   const capture = String(s.capture_name || "");
-  const isAuxLive = s.playing && (mode === "aux" || /behringer|umc|usb audio|line/i.test(capture));
+  const isAuxLive = liveOn && (mode === "aux" || /behringer|umc|usb audio|line/i.test(capture));
   const rms = Number(s.input_rms || 0);
   let sidebarText = "Not connected";
   let sidebarOnline = false;
-  if (isAuxLive) {
+  if (demoOn) {
+    sidebarOnline = true;
+    sidebarText = "Demo · demo.wav";
+  } else if (isAuxLive) {
     sidebarOnline = true;
     const short =
       capture.replace(/\s*\[.*?\]\s*/g, "").trim().slice(0, 28) || "AUX";
     sidebarText = rms > 0.002 ? `AUX Live · ${short}` : `AUX Live · waiting…`;
-  } else if (s.playing && mode === "cable") {
+  } else if (liveOn && mode === "cable") {
     sidebarOnline = true;
     sidebarText = rms > 0.002 ? "Bluetooth Live · signal" : "Bluetooth Live · waiting…";
   } else if (online) {
@@ -238,7 +373,7 @@ function render(s) {
   } else {
     el("statusTitle").textContent = online ? `Connected to ${connected.name}` : "Not connected";
   }
-  let sub = online ? connected.profile : "Pair a nearby phone, then Connect.";
+  let sub = online ? connected.profile : "Paired phones appear automatically. Scan to find a new phone.";
   if (isAuxLive) {
     sub = rms > 0.002
       ? `Capturing ${capture || "AUX"} → Gigaport`
@@ -248,25 +383,32 @@ function render(s) {
   } else if (connectingId) {
     sub = "Please wait — opening Bluetooth audio connection…";
   } else if (online && s.engine_error) sub = `BT connected, but Start Live failed: ${s.engine_error}`;
-  else if (online && s.playing && s.capture_name) sub = `Live ON · capturing ${s.capture_name}`;
+  else if (online && liveOn && s.capture_name) sub = `Live ON · capturing ${s.capture_name}`;
   else if (online && s.engine_ok === false) sub = `BT connected, engine unavailable: ${s.engine_error || "unknown"}`;
   else if (!online && bt.error) sub = bt.error;
   else if (!online && bt.supported === false) sub = "Bluetooth receiver unavailable on this machine (Windows only).";
   else if (online) sub = "Connected — play music on the phone, then go to Now Playing and press Play.";
-  else if (bt.discovering) sub = "Searching nearby phones — put the phone in pairing mode…";
-  else if (bt.scanning) sub = "Refreshing paired audio phones…";
+  else if (bt.scanning || bt.discovering) sub = "Scanning nearby — put the phone in pairing mode…";
   el("statusSub").textContent = sub;
+  const forgetting = Boolean(bt.forgetting);
   el("disconnectBtn").hidden = !online || Boolean(connectingId) || Boolean(pairingId);
+  el("disconnectBtn").disabled = forgetting;
+  // Single-device Forget hidden for now — use Forget all.
+  const forgetBtn = el("forgetBtn");
+  if (forgetBtn) {
+    forgetBtn.hidden = true;
+    forgetBtn.disabled = true;
+  }
 
   const scanBtn = el("scanBtn");
-  const busyBt = Boolean(bt.scanning) || Boolean(bt.discovering) || Boolean(connectingId) || Boolean(pairingId);
-  scanBtn.classList.toggle("scanning", Boolean(bt.scanning));
+  const busyBt = Boolean(bt.scanning) || Boolean(bt.discovering) || Boolean(connectingId) || Boolean(pairingId) || forgetting;
+  scanBtn.classList.toggle("scanning", Boolean(bt.scanning) || Boolean(bt.discovering));
   scanBtn.disabled = busyBt;
-  el("scanLabel").textContent = bt.scanning ? "Scanning…" : "Scan";
-  const addBtn = el("addPhoneBtn");
-  if (addBtn) {
-    addBtn.disabled = busyBt;
-    addBtn.textContent = bt.discovering ? "Finding…" : "Find nearby";
+  el("scanLabel").textContent = (bt.scanning || bt.discovering) ? "Scanning…" : "Scan";
+  const forgetAllBtn = el("forgetAllBtn");
+  if (forgetAllBtn) {
+    forgetAllBtn.disabled = busyBt;
+    forgetAllBtn.textContent = forgetting ? "Forgetting…" : "Forget all";
   }
 
   renderDevices(s);
@@ -282,6 +424,7 @@ function devicesSig(s) {
     s.bluetooth.connecting_id || "",
     s.bluetooth.scanning ? "1" : "0",
     s.bluetooth.pairing_id || "",
+    s.bluetooth.forgetting ? "1" : "0",
   ].join("::");
 }
 
@@ -306,20 +449,12 @@ function renderDevices(s) {
   const connectingId = s.bluetooth.connecting_id || null;
   const pairingId = s.bluetooth.pairing_id || null;
   const scanning = Boolean(s.bluetooth.scanning);
-  const busy = Boolean(connectingId) || Boolean(pairingId);
-
-  if (scanning && !devices.length) {
-    const li = document.createElement("li");
-    li.className = "device empty scanning";
-    li.innerHTML = `<div class="device-meta"><span class="device-name">Scanning…</span><span class="device-sub">Listing paired phones…</span></div>`;
-    list.appendChild(li);
-    return;
-  }
+  const busy = Boolean(connectingId) || Boolean(pairingId) || Boolean(s.bluetooth.forgetting);
 
   if (!devices.length) {
     const li = document.createElement("li");
     li.className = "device empty";
-    const msg = "No paired phones yet — use Find nearby below, then Pair.";
+    const msg = "No paired phones yet — Scan below to find a phone, then Pair.";
     li.innerHTML = `<div class="device-meta"><span class="device-name">No paired phones</span><span class="device-sub">${msg}</span></div>`;
     list.appendChild(li);
     return;
@@ -375,7 +510,7 @@ function renderNearby(s) {
   if (discovering && !devices.length) {
     const li = document.createElement("li");
     li.className = "device empty scanning";
-    li.innerHTML = `<div class="device-meta"><span class="device-name">Finding nearby…</span><span class="device-sub">Put the phone in pairing / discoverable mode (~20s).</span></div>`;
+    li.innerHTML = `<div class="device-meta"><span class="device-name">Scanning nearby…</span><span class="device-sub">Put the phone in pairing / discoverable mode.</span></div>`;
     list.appendChild(li);
     return;
   }
@@ -383,9 +518,7 @@ function renderNearby(s) {
   if (!devices.length) {
     const li = document.createElement("li");
     li.className = "device empty";
-    const msg = s.bluetooth.error && !s.devices?.length
-      ? s.bluetooth.error
-      : "Tap Find nearby. Confirm on the phone when Windows/phone prompts appear.";
+    const msg = "Press Scan to search for nearby phones.";
     li.innerHTML = `<div class="device-meta"><span class="device-name">No nearby phones</span><span class="device-sub">${msg}</span></div>`;
     list.appendChild(li);
     return;
@@ -399,7 +532,7 @@ function renderNearby(s) {
     if (isPairing) {
       action = '<button class="btn-connect busy" disabled><span class="btn-spin"></span>Pairing…</button>';
     } else if (d.paired || d.can_pair === false) {
-      action = '<span class="badge">Scan above</span>';
+      action = '<span class="badge">Already paired</span>';
     } else {
       action = `<button class="btn-connect" data-pair-id="${d.id}" ${busy ? "disabled" : ""}>Pair</button>`;
     }
@@ -493,19 +626,84 @@ function wire() {
     render(await api.set_highpass_hz(pctToCutoffHz(pct)));
   });
 
+  // Demo tab — same controls, plays demo.wav through Live path
+  if (el("demoPlayBtn")) {
+    el("demoPlayBtn").addEventListener("click", async () => {
+      if (demoPlayClickLock) return;
+      demoPlayClickLock = true;
+      const wasDemo = isDemoPlaying(lastState);
+      el("demoPlayBtn").disabled = true;
+      el("demoPlayBtn").classList.add("busy");
+      const hint = el("demoHint");
+      if (hint) hint.textContent = wasDemo ? "Stopping…" : "Starting demo — please wait…";
+      try {
+        render(await api.toggle_demo_play());
+      } finally {
+        demoPlayClickLock = false;
+        render(await api.get_state());
+      }
+    });
+
+    el("demoSeek").addEventListener("input", () => {
+      demoSeeking = true;
+      const dur = Number(lastState.track?.duration || 0);
+      if (dur > 0 && isDemoPlaying(lastState)) {
+        const pos = (el("demoSeek").value / 1000) * dur;
+        el("demoTimeCur").textContent = fmtTime(pos);
+      }
+    });
+    el("demoSeek").addEventListener("change", async () => {
+      const dur = Number(lastState.track?.duration || 0);
+      try {
+        if (dur > 0 && isDemoPlaying(lastState)) {
+          const pos = (el("demoSeek").value / 1000) * dur;
+          render(await api.seek(pos));
+        }
+      } finally {
+        demoSeeking = false;
+      }
+    });
+
+    el("demoPrevBtn").addEventListener("click", async () => {
+      if (el("demoPrevBtn").disabled) return;
+      render(await api.previous_track());
+    });
+    el("demoNextBtn").addEventListener("click", async () => {
+      if (el("demoNextBtn").disabled) return;
+      render(await api.next_track());
+    });
+
+    el("demoVolume").addEventListener("input", async () => {
+      el("demoVolVal").textContent = `${el("demoVolume").value}%`;
+      render(await api.set_volume(el("demoVolume").value / 100));
+    });
+    el("demoVibration").addEventListener("input", async () => {
+      el("demoVibVal").textContent = `${el("demoVibration").value}%`;
+      render(await api.set_vibration(el("demoVibration").value / 100));
+    });
+    el("demoHighpass").addEventListener("input", async () => {
+      const pct = Number(el("demoHighpass").value);
+      el("demoHpVal").textContent = `${pct}%`;
+      render(await api.set_highpass_hz(pctToCutoffHz(pct)));
+    });
+  }
+
   el("scanBtn").addEventListener("click", async () => {
     if (el("scanBtn").disabled) return;
+    lastNearbySig = "";
     lastDevicesSig = "";
     render(await api.scan_bluetooth());
-  });
-  el("addPhoneBtn").addEventListener("click", async () => {
-    if (el("addPhoneBtn").disabled) return;
-    lastNearbySig = "";
-    render(await api.discover_nearby());
   });
   el("disconnectBtn").addEventListener("click", async () => {
     lastDevicesSig = "";
     render(await api.disconnect_device());
+  });
+  el("forgetAllBtn").addEventListener("click", async () => {
+    if (el("forgetAllBtn").disabled) return;
+    if (!window.confirm("Forget ALL paired Bluetooth devices from Windows on this tablet?")) return;
+    lastDevicesSig = "";
+    lastNearbySig = "";
+    render(await api.forget_all_devices());
   });
 }
 
@@ -515,7 +713,7 @@ async function boot() {
   wire();
   render(await api.get_state());
   setInterval(async () => {
-    if (!seeking) render(await api.get_state());
+    if (!seeking && !demoSeeking) render(await api.get_state());
   }, 400);
 }
 

@@ -652,6 +652,11 @@ class LiveAudioEngine:
         self.output_stream: sd.OutputStream | None = None
         self._loopback_thread: SoundcardLoopbackThread | None = None
         self._loopback_stop = threading.Event()
+        self._file_thread: threading.Thread | None = None
+        self._file_pcm: np.ndarray | None = None
+        self._file_pos = 0
+        self._file_lock = threading.Lock()
+        self._file_loop = True
         self._capture_ring = np.zeros((0, 2), dtype=np.float32)
         self._capture_read_idx = 0
         # Differential-delay rings (full mode): audio + vibration aligned to a
@@ -1222,9 +1227,157 @@ class LiveAudioEngine:
             f"Could not open capture/output after {len(input_configs)} attempts.{hint}{cause}"
         ) from last_error
 
+    def start_from_pcm(
+        self,
+        pcm: np.ndarray,
+        sample_rate: int,
+        output_device_index: int,
+        *,
+        segmentation_id: str = "default",
+        frequency_profile_id: str = "satori",
+        synthetic_vibro: bool = False,
+        synthetic_type_id: str = "sine",
+        loop: bool = True,
+    ) -> None:
+        """Play stereo PCM through the same vibration → Gigaport path as Live capture."""
+        pcm = np.asarray(pcm, dtype=np.float32)
+        if pcm.ndim == 1:
+            pcm = np.repeat(pcm.reshape(-1, 1), 2, axis=1)
+        elif pcm.shape[1] == 1:
+            pcm = np.repeat(pcm, 2, axis=1)
+        elif pcm.shape[1] > 2:
+            pcm = pcm[:, :2]
+        if len(pcm) == 0:
+            raise RuntimeError("Demo audio is empty")
+
+        self.set_vibration_overlay(False)
+        _validate_output_device(output_device_index)
+        self.stop()
+
+        self.output_device_index = output_device_index
+        self.output_sample_rate = _pick_output_sample_rate(output_device_index)
+        self.input_sample_rate = int(sample_rate)
+        self.capture_channels = 2
+        self.processor = LiveStreamProcessor(
+            sample_rate=PROCESSING_SR,
+            segmentation_id=segmentation_id,
+            frequency_profile_id=frequency_profile_id,
+            synthetic_vibro=synthetic_vibro,
+            synthetic_type_id=synthetic_type_id,
+        )
+        self.processor.set_highpass_hz(self.highpass_hz)
+        self.processor.set_lowpass_hz(self.lowpass_hz)
+        self.processor.set_zone_gains(
+            head=self.intensity_head,
+            upper_mid=self.intensity_upper,
+            legs=self.intensity_legs,
+            mid=self.intensity_mid,
+        )
+
+        with self.lock:
+            self._output_ring.clear()
+            self._current_block = None
+            self._current_offset = 0
+        self._reset_capture_ring()
+
+        with self._file_lock:
+            self._file_pcm = pcm
+            self._file_pos = 0
+            self._file_loop = bool(loop)
+
+        self._loopback_stop.clear()
+        self.output_stream = self._open_output_stream(output_device_index)
+        self.output_stream.start()
+        self.is_active = True
+        self._file_thread = threading.Thread(
+            target=self._file_feed_loop,
+            name="demo-file-feed",
+            daemon=True,
+        )
+        self._file_thread.start()
+
+    def seek_file(self, seconds: float) -> None:
+        with self._file_lock:
+            pcm = self._file_pcm
+            if pcm is None or self.input_sample_rate <= 0:
+                return
+            frame = int(max(0.0, float(seconds)) * self.input_sample_rate)
+            self._file_pos = min(frame, len(pcm) - 1)
+        self._reset_capture_ring()
+        with self.lock:
+            self._output_ring.clear()
+            self._current_block = None
+            self._current_offset = 0
+
+    def get_file_progress(self) -> dict[str, float]:
+        with self._file_lock:
+            pcm = self._file_pcm
+            pos = self._file_pos
+            sr = float(self.input_sample_rate or 1)
+            if pcm is None or len(pcm) == 0:
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+            duration = float(len(pcm)) / sr
+            position = float(pos) / sr
+            fraction = position / duration if duration > 0 else 0.0
+            return {
+                "position": position,
+                "duration": duration,
+                "fraction": max(0.0, min(1.0, fraction)),
+            }
+
+    def _file_feed_loop(self) -> None:
+        """Clocked stereo feed into the same ingest path used by Live capture."""
+        while not self._loopback_stop.is_set() and self.is_active:
+            with self._file_lock:
+                pcm = self._file_pcm
+                pos = self._file_pos
+                loop = self._file_loop
+            if pcm is None or len(pcm) == 0:
+                break
+
+            end = pos + BLOCKSIZE
+            if end <= len(pcm):
+                chunk = pcm[pos:end]
+                new_pos = end
+            elif loop:
+                first = pcm[pos:]
+                need = BLOCKSIZE - len(first)
+                chunk = np.concatenate([first, pcm[:need]], axis=0)
+                new_pos = need
+            else:
+                if pos >= len(pcm):
+                    break
+                chunk = pcm[pos:]
+                new_pos = len(pcm)
+
+            with self._file_lock:
+                self._file_pos = new_pos
+                total = float(len(pcm))
+                frac = float(new_pos) / total if total > 0 else 0.0
+
+            try:
+                self._ingest_capture(chunk)
+            except Exception:
+                pass
+
+            with self.lock:
+                self.stats["progress_fraction"] = frac
+
+            delay = float(len(chunk)) / float(max(1, self.input_sample_rate))
+            if self._loopback_stop.wait(timeout=max(0.001, delay * 0.92)):
+                break
+
+            if not loop and new_pos >= len(pcm):
+                break
+
+        self.is_active = False
+
     def stop(self) -> None:
         self.is_active = False
         self._loopback_stop.set()
+        if self._file_thread is not None:
+            self._file_thread.join(timeout=2.0)
+            self._file_thread = None
         if self._loopback_thread is not None:
             self._loopback_thread.join(timeout=2.0)
             self._loopback_thread = None
@@ -1238,6 +1391,10 @@ class LiveAudioEngine:
             except Exception:
                 pass
             setattr(self, stream_attr, None)
+
+        with self._file_lock:
+            self._file_pcm = None
+            self._file_pos = 0
 
         self._reset_capture_ring()
         with self.lock:

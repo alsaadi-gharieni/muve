@@ -22,6 +22,12 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
+from demo_audio import (  # noqa: E402
+    demo_track_info,
+    get_demo_progress,
+    seek_demo,
+    start_demo_audio,
+)
 from live_audio import (  # noqa: E402
     get_runtime_stats,
     is_active,
@@ -70,6 +76,36 @@ def main() -> int:
                     f"output={result.get('output_name')!r}"
                 )
                 _reply({**result, "event": "started"})
+
+            elif cmd == "start_demo":
+                # Stop any Live capture first — shared LiveAudioEngine / ASIO.
+                stop_live_audio()
+                v = float(msg.get("vibration", 0.27))
+                result = start_demo_audio(
+                    volume=float(msg.get("volume", 0.70)),
+                    mid=v,
+                    legs=v,
+                    upper=v,
+                    head=v,
+                    cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
+                    path=msg.get("path"),
+                    loop=bool(msg.get("loop", True)),
+                )
+                print(
+                    f"[engine_worker] START DEMO ok — file={result.get('capture')!r} "
+                    f"output={result.get('output_name')!r}"
+                )
+                _reply({**result, "event": "started"})
+
+            elif cmd == "demo_info":
+                _reply({"ok": True, "track": demo_track_info(msg.get("path"))})
+
+            elif cmd == "seek_demo":
+                progress = seek_demo(float(msg.get("seconds", 0.0)))
+                _reply({"ok": True, **progress})
+
+            elif cmd == "demo_progress":
+                _reply({"ok": True, **get_demo_progress()})
 
             elif cmd == "stop":
                 stop_live_audio()

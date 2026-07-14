@@ -788,6 +788,20 @@ class BluetoothAudioService:
         print(f"[bt_audio] pair result status={status_name} ok={paired}")
 
         if not paired:
+            # status 19 = FAILED — often leftover pairing on the phone.
+            is_failed = (
+                status_name in ("FAILED", "19")
+                or (DevicePairingResultStatus is not None
+                    and status == getattr(DevicePairingResultStatus, "FAILED", None))
+                or str(status).endswith(".FAILED")
+                or str(getattr(status, "value", "")) == "19"
+            )
+            forget_phone_msg = (
+                "Pairing failed (status 19).\n\n"
+                "This phone was likely paired with this tablet before.\n"
+                "On the phone: open Bluetooth settings → forget / unpair this PC "
+                "(or tablet), then put the phone in pairing mode and try Pair again."
+            )
             friendly = {
                 "PAIRING_CANCELED": "Pairing wasn't confirmed. Accept on the phone / Windows prompt, then try again.",
                 "AUTHENTICATION_TIMEOUT": "Pairing wasn't confirmed in time. Try again.",
@@ -796,9 +810,16 @@ class BluetoothAudioService:
                 "REJECTED_BY_HANDLER": "This phone asked for a PIN we don't support yet. Try another phone or pair from Windows once.",
                 "REQUIRED_HANDLER_NOT_REGISTERED": "Pairing handler missing — restart the app and try again.",
                 "NOT_READY_TO_PAIR": "Phone isn't ready to pair. Put it in pairing mode, then try again.",
-                "FAILED": "Pairing failed. Put the phone in pairing mode and try again.",
-            }.get(status_name, f"Pairing wasn't confirmed ({status_name}). Try again.")
-            return {"ok": False, "error": friendly, "status": status_name, "name": name}
+                "FAILED": forget_phone_msg,
+                "19": forget_phone_msg,
+            }.get(status_name, forget_phone_msg if is_failed else f"Pairing wasn't confirmed ({status_name}). Try again.")
+            return {
+                "ok": False,
+                "error": friendly,
+                "status": status_name if status_name != "19" else "FAILED",
+                "name": name,
+                "alert": is_failed or status_name in ("FAILED", "19"),
+            }
 
         # APC audio endpoints can take a moment to appear after pairing.
         await asyncio.sleep(2.0)
@@ -1087,7 +1108,7 @@ class BluetoothAudioService:
     async def _get_status(self, device_id: str) -> dict[str, Any]:
         radio_on = await self._bluetooth_radio_on()
         if radio_on is False:
-            await self._disconnect(device_id)
+            await self._disconnect(device_id, forget=False)
             return {
                 "connected": False,
                 "reason": "bluetooth_off",
@@ -1096,7 +1117,7 @@ class BluetoothAudioService:
 
         if device_id in self._dropped_ids:
             self._dropped_ids.discard(device_id)
-            await self._disconnect(device_id)
+            await self._disconnect(device_id, forget=False)
             return {
                 "connected": False,
                 "reason": "closed",
@@ -1110,7 +1131,7 @@ class BluetoothAudioService:
         try:
             state = conn.state
         except Exception as exc:  # noqa: BLE001
-            await self._disconnect(device_id)
+            await self._disconnect(device_id, forget=False)
             return {
                 "connected": False,
                 "reason": "state_error",
@@ -1123,7 +1144,7 @@ class BluetoothAudioService:
 
         present = await self._device_still_present(device_id)
         if not present:
-            await self._disconnect(device_id)
+            await self._disconnect(device_id, forget=False)
             return {
                 "connected": False,
                 "reason": "device_gone",
@@ -1132,7 +1153,7 @@ class BluetoothAudioService:
 
         if device_id in self._opened_ids:
             self._opened_ids.discard(device_id)
-            await self._disconnect(device_id)
+            await self._disconnect(device_id, forget=False)
             return {
                 "connected": False,
                 "reason": "closed",
@@ -1142,7 +1163,8 @@ class BluetoothAudioService:
         return {"connected": True, "state": "waiting"}
 
     # ----------------------------------------------------------- disconnect ---
-    def disconnect(self, device_id: str | None = None, *, forget: bool = True) -> dict[str, Any]:
+    def disconnect(self, device_id: str | None = None, *, forget: bool = False) -> dict[str, Any]:
+        """Close AudioPlaybackConnection only (keeps Windows pairing by default)."""
         if not self.available:
             return {"ok": True}
         try:
@@ -1152,7 +1174,31 @@ class BluetoothAudioService:
             self.last_error = str(exc)
             return {"ok": False, "error": str(exc)}
 
-    async def _disconnect(self, device_id: str | None, *, forget: bool = True) -> None:
+    def forget_device(self, device_id: str) -> dict[str, Any]:
+        """Close connection if open, then unpair from Windows (real forget)."""
+        if not self.available:
+            return {"ok": False, "error": self.last_error or "unsupported"}
+        try:
+            return self._run(self._forget_device(device_id), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            print("[bt_audio] forget_device failed:")
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc)}
+
+    def forget_all(self) -> dict[str, Any]:
+        """Unpair every paired Bluetooth device from Windows (real forget all)."""
+        if not self.available:
+            return {"ok": False, "error": self.last_error or "unsupported"}
+        try:
+            return self._run(self._forget_all(), timeout=90.0)
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            print("[bt_audio] forget_all failed:")
+            traceback.print_exc()
+            return {"ok": False, "error": str(exc)}
+
+    async def _disconnect(self, device_id: str | None, *, forget: bool = False) -> None:
         ids = [device_id] if device_id else list(self._connections.keys())
         for did in ids:
             if not did:
@@ -1176,23 +1222,110 @@ class BluetoothAudioService:
             if forget:
                 await self._unpair(did)
 
-    async def _unpair(self, device_id: str) -> None:
+    async def _forget_device(self, device_id: str) -> dict[str, Any]:
+        await self._disconnect(device_id, forget=False)
+        ok = await self._unpair(device_id)
+        # Also try to resolve APC meta / nearby alias ids by name if needed.
+        return {"ok": ok, "device_id": device_id}
+
+    async def _forget_all(self) -> dict[str, Any]:
+        await self._disconnect(None, forget=False)
+        ids = await self._list_paired_bluetooth_ids()
+        print(f"[bt_audio] forget_all: {len(ids)} paired device id(s)")
+        forgotten = 0
+        errors: list[str] = []
+        for did in ids:
+            try:
+                if await self._unpair(did):
+                    forgotten += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{did[-20:]}:{exc}")
+        self._device_meta.clear()
+        self._nearby_meta.clear()
+        return {
+            "ok": True,
+            "forgotten": forgotten,
+            "total": len(ids),
+            "errors": errors[:5],
+        }
+
+    async def _list_paired_bluetooth_ids(self) -> list[str]:
+        """Collect Windows-paired Bluetooth device IDs (classic + LE + APC)."""
+        seen: set[str] = set()
+        selectors: list[tuple[str, str]] = []
+        if _BT_DEVICE_OK and BluetoothDevice is not None:
+            try:
+                selectors.append(
+                    ("bt_paired", str(BluetoothDevice.get_device_selector_from_pairing_state(True)))
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bt_audio] bt paired selector failed: {exc}")
+        if _BT_DEVICE_OK and BluetoothLEDevice is not None:
+            try:
+                selectors.append(
+                    (
+                        "ble_paired",
+                        str(BluetoothLEDevice.get_device_selector_from_pairing_state(True)),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bt_audio] ble paired selector failed: {exc}")
+        try:
+            selectors.append(("apc", self._apc_selector()))
+        except Exception:  # noqa: BLE001
+            pass
+
+        kind = self._association_endpoint_kind()
+        for label, selector in selectors:
+            infos: list[Any] = []
+            try:
+                if kind is not None:
+                    fn = getattr(
+                        DeviceInformation,
+                        "find_all_async_with_kind_aqs_filter_and_additional_properties",
+                        None,
+                    )
+                    if fn is not None:
+                        infos = list(await fn(selector, [], kind))
+                if not infos:
+                    infos = list(await DeviceInformation.find_all_async_aqs_filter(selector))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bt_audio] {label} enum for forget_all failed: {exc}")
+                continue
+            print(f"[bt_audio] {label}: {len(infos)} for forget_all")
+            for info in infos:
+                try:
+                    did = str(info.id)
+                    if did:
+                        seen.add(did)
+                except Exception:  # noqa: BLE001
+                    pass
+        # Include any ids we currently track.
+        seen.update(self._connections.keys())
+        seen.update(self._device_meta.keys())
+        return sorted(seen)
+
+    async def _unpair(self, device_id: str) -> bool:
         try:
             info = await DeviceInformation.create_from_id_async(device_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[bt_audio] unpair lookup failed: {exc}")
-            return
+            return False
         pairing = getattr(info, "pairing", None) if info else None
-        if pairing is None or not bool(getattr(pairing, "is_paired", False)):
-            return
+        if pairing is None:
+            print(f"[bt_audio] unpair: no pairing object for {device_id[-24:]}…")
+            return False
+        if not bool(getattr(pairing, "is_paired", False)):
+            print(f"[bt_audio] unpair: already unpaired {device_id[-24:]}…")
+            return True
         try:
             result = await pairing.unpair_async()
-            print(
-                f"[bt_audio] unpaired {device_id[-24:]}… "
-                f"status={_status_name(getattr(result, 'status', result))}"
-            )
+            status = _status_name(getattr(result, "status", result))
+            print(f"[bt_audio] unpaired {device_id[-24:]}… status={status}")
+            return status.upper() in ("UNPAIRED", "ALREADY_UNPAIRED", "SUCCESS")
         except Exception as exc:  # noqa: BLE001
             print(f"[bt_audio] unpair failed: {exc}")
+            return False
 
 
 def _status_name(status: Any) -> str:

@@ -83,5 +83,10 @@ temp/
 *.ogg
 *.m4a
 
+# Ship the built-in Demo tab track (exception to the rules above)
+!new/assets/
+!new/assets/demo.mp3
+!new/assets/demo.wav
+
 # Logs
 *.log

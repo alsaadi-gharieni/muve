@@ -20,6 +20,10 @@
           <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
           <span>Now Playing</span>
         </button>
+        <button class="nav-item" data-screen="demo">
+          <svg viewBox="0 0 24 24"><path d="M12 3v10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 7l4-4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="14" width="16" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Demo</span>
+        </button>
         <button class="nav-item" data-screen="bluetooth">
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Bluetooth</span>
@@ -115,10 +119,92 @@
               <div class="slider-card">
                 <div class="slider-head">
                   <svg viewBox="0 0 24 24"><path d="M3 12h3l2 6 4-14 2 8 2-4h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  <span>Bass cutoff</span>
+                  <span>Bass depth</span>
                   <span class="slider-val" id="hpVal">76%</span>
                 </div>
                 <input type="range" id="highpass" min="0" max="100" value="76" class="range" />
+                <p class="slider-hint">Lower % = deeper bass. Higher % = brighter / less deep rumble.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DEMO — same layout/controls as Now Playing; plays assets/demo.wav -->
+      <section class="screen" id="screen-demo">
+        <div class="np-backdrop" id="demoBackdrop"></div>
+
+        <div class="np">
+          <div class="np-art-col">
+            <div class="np-art-wrap">
+              <img class="np-art" id="demoArt" src="assets/artwork.svg" alt="artwork" />
+            </div>
+            <!-- <div class="howto" id="demoHowto">
+              <div class="howto-card">
+                <h3>Demo</h3>
+                <ol>
+                  <li>Press <strong>Play</strong> to run <strong>demo.wav</strong></li>
+                  <li>Same Gigaport path as Bluetooth Live (audio + vibration)</li>
+                  <li>Use Vibration / Volume / Bass depth while it plays</li>
+                </ol>
+              </div>
+            </div> -->
+          </div>
+
+          <div class="np-info">
+            <div class="np-meta">
+              <h1 class="np-title" id="demoTitle">Demo</h1>
+              <p class="np-artist" id="demoArtist">MUVI test track</p>
+              <p class="np-album" id="demoAlbum">assets/demo.wav</p>
+            </div>
+
+            <div class="scrubber">
+              <input type="range" id="demoSeek" min="0" max="1000" value="0" class="range range-seek" />
+              <div class="times">
+                <span id="demoTimeCur">0:00</span>
+                <span id="demoTimeDur">0:00</span>
+              </div>
+            </div>
+
+            <div class="transport">
+              <button class="tbtn" id="demoPrevBtn" title="Restart">
+                <svg viewBox="0 0 24 24"><path d="M19 5v14l-9-7 9-7zM7 5v14" fill="currentColor"/></svg>
+              </button>
+              <button class="tbtn play" id="demoPlayBtn" title="Play / Stop demo.wav">
+                <svg id="demoPlayIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              </button>
+              <button class="tbtn" id="demoNextBtn" title="Restart">
+                <svg viewBox="0 0 24 24"><path d="M5 5v14l9-7-9-7zM17 5v14" fill="currentColor"/></svg>
+              </button>
+            </div>
+            <p class="live-hint" id="demoHint"></p>
+
+            <div class="sliders">
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Vibration</span>
+                  <span class="slider-val" id="demoVibVal">27%</span>
+                </div>
+                <input type="range" id="demoVibration" min="0" max="200" value="27" class="range" />
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor"/><path d="M17 8a5 5 0 010 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Volume</span>
+                  <span class="slider-val" id="demoVolVal">70%</span>
+                </div>
+                <input type="range" id="demoVolume" min="0" max="100" value="70" class="range" />
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M3 12h3l2 6 4-14 2 8 2-4h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>Bass depth</span>
+                  <span class="slider-val" id="demoHpVal">76%</span>
+                </div>
+                <input type="range" id="demoHighpass" min="0" max="100" value="76" class="range" />
                 <p class="slider-hint">Lower % = deeper bass. Higher % = brighter / less deep rumble.</p>
               </div>
             </div>
@@ -131,10 +217,9 @@
         <header class="screen-head">
           <div>
             <h1>Bluetooth</h1>
-            <p class="subtle">Find nearby → Pair in-app → Connect. Confirm on the phone when prompted.</p>
+            <p class="subtle">Scan finds nearby phones to Pair. Paired phones appear automatically — tap Connect.</p>
           </div>
           <div class="head-actions">
-            <button class="btn-ghost" id="addPhoneBtn">Find nearby</button>
             <button class="btn-primary" id="scanBtn">
               <span class="scan-spinner" id="scanSpinner"></span>
               <span id="scanLabel">Scan</span>
@@ -148,12 +233,18 @@
           </div>
           <div class="status-text">
             <strong id="statusTitle">Not connected</strong>
-            <span class="subtle" id="statusSub">Pair a nearby phone, then Connect.</span>
+            <span class="subtle" id="statusSub">Paired phones show below. Scan to find a new phone.</span>
           </div>
-          <button class="btn-ghost" id="disconnectBtn" hidden>Disconnect &amp; forget</button>
+          <div class="status-actions">
+            <button class="btn-ghost" id="disconnectBtn" hidden>Disconnect</button>
+            <button class="btn-ghost danger" id="forgetBtn" hidden style="display:none">Forget</button>
+          </div>
         </div>
 
-        <h2 class="list-title">Paired phones</h2>
+        <div class="list-head">
+          <h2 class="list-title">Paired phones</h2>
+          <button class="btn-ghost danger sm" id="forgetAllBtn">Forget all</button>
+        </div>
         <ul class="device-list" id="deviceList"></ul>
 
         <h2 class="list-title">Nearby — tap Pair</h2>

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MUVI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">MUVI</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-screen="now-playing">
+          <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>Now Playing</span>
+        </button>
+        <button class="nav-item" data-screen="bluetooth">
+          <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Bluetooth</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="conn-pill" id="sidebarConn">
+          <span class="conn-dot"></span>
+          <span id="sidebarConnText">Not connected</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <!-- NOW PLAYING -->
+      <section class="screen active" id="screen-now-playing">
+        <div class="np-backdrop" id="npBackdrop"></div>
+
+        <div class="np">
+          <div class="np-art-col">
+            <div class="np-art-wrap">
+              <img class="np-art" id="npArt" src="assets/artwork.svg" alt="artwork" />
+            </div>
+            <div class="howto" id="howto">
+              <div class="howto-card">
+                <h3>AUX</h3>
+                <ol>
+                  <li>Disconnect Bluetooth in this app (or skip Connect)</li>
+                  <li>Plug phone AUX into Behringer (line-in)</li>
+                  <li>Play music on the phone, then press <strong>Play</strong></li>
+                </ol>
+              </div>
+              <div class="howto-card">
+                <h3>Bluetooth</h3>
+                <ol>
+                  <li>Open <strong>Bluetooth</strong> → Scan → Connect phone</li>
+                  <li>When connected, play music on the phone</li>
+                  <li>Come back here and press <strong>Play</strong></li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div class="np-info">
+            <div class="np-meta">
+              <h1 class="np-title" id="npTitle">—</h1>
+              <p class="np-artist" id="npArtist">—</p>
+              <p class="np-album" id="npAlbum">—</p>
+            </div>
+
+            <div class="scrubber">
+              <input type="range" id="seek" min="0" max="1000" value="0" class="range range-seek" />
+              <div class="times">
+                <span id="timeCur">0:00</span>
+                <span id="timeDur">0:00</span>
+              </div>
+            </div>
+
+            <div class="transport">
+              <button class="tbtn" id="prevBtn" title="Previous track">
+                <svg viewBox="0 0 24 24"><path d="M19 5v14l-9-7 9-7zM7 5v14" fill="currentColor"/></svg>
+              </button>
+              <button class="tbtn play" id="playBtn" title="Start Live / Stop Live">
+                <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              </button>
+              <button class="tbtn" id="nextBtn" title="Next track">
+                <svg viewBox="0 0 24 24"><path d="M5 5v14l9-7-9-7zM17 5v14" fill="currentColor"/></svg>
+              </button>
+            </div>
+            <p class="live-hint" id="liveHint"></p>
+
+            <div class="sliders">
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M12 3v18M7 7v10M17 7v10M3 10v4M21 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Vibration</span>
+                  <span class="slider-val" id="vibVal">27%</span>
+                </div>
+                <input type="range" id="vibration" min="0" max="200" value="27" class="range" />
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor"/><path d="M17 8a5 5 0 010 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Volume</span>
+                  <span class="slider-val" id="volVal">70%</span>
+                </div>
+                <input type="range" id="volume" min="0" max="100" value="70" class="range" />
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M3 12h3l2 6 4-14 2 8 2-4h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>Bass cutoff</span>
+                  <span class="slider-val" id="hpVal">76%</span>
+                </div>
+                <input type="range" id="highpass" min="0" max="100" value="76" class="range" />
+                <p class="slider-hint">Lower % = deeper bass. Higher % = brighter / less deep rumble.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BLUETOOTH -->
+      <section class="screen" id="screen-bluetooth">
+        <header class="screen-head">
+          <div>
+            <h1>Bluetooth</h1>
+            <p class="subtle">Find nearby → Pair in-app → Connect. Confirm on the phone when prompted.</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn-ghost" id="addPhoneBtn">Find nearby</button>
+            <button class="btn-primary" id="scanBtn">
+              <span class="scan-spinner" id="scanSpinner"></span>
+              <span id="scanLabel">Scan</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="status-card" id="statusCard">
+          <div class="status-icon">
+            <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="status-text">
+            <strong id="statusTitle">Not connected</strong>
+            <span class="subtle" id="statusSub">Pair a nearby phone, then Connect.</span>
+          </div>
+          <button class="btn-ghost" id="disconnectBtn" hidden>Disconnect &amp; forget</button>
+        </div>
+
+        <h2 class="list-title">Paired phones</h2>
+        <ul class="device-list" id="deviceList"></ul>
+
+        <h2 class="list-title">Nearby — tap Pair</h2>
+        <ul class="device-list" id="nearbyList"></ul>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

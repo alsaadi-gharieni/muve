@@ -27,6 +27,18 @@ const MockApi = (() => {
       state.position = Math.min(state.track.duration, state.position + (now - last) / 1000);
     }
     last = now;
+    // Fake per-zone shaker levels so the visualization previews in a browser.
+    const t = now / 1000;
+    state.zone_rms = state.playing
+      ? {
+          head: 0.10 + 0.09 * Math.abs(Math.sin(t * 1.3)),
+          upper: 0.10 + 0.09 * Math.abs(Math.sin(t * 1.7 + 1)),
+          mid: 0.10 + 0.09 * Math.abs(Math.sin(t * 2.1 + 2)),
+          legs: 0.10 + 0.09 * Math.abs(Math.sin(t * 0.9 + 3)),
+          left: state.volume * (0.14 + 0.13 * Math.abs(Math.sin(t * 1.5 + 4))),
+          right: state.volume * (0.14 + 0.13 * Math.abs(Math.sin(t * 1.1 + 5))),
+        }
+      : { head: 0, upper: 0, mid: 0, legs: 0, left: 0, right: 0 };
     return JSON.parse(JSON.stringify(state));
   };
   return {
@@ -179,6 +191,187 @@ function isLivePlaying(s) {
   return Boolean(s && s.playing && s.live_mode !== "demo");
 }
 
+// ------------------------------------------------- shaker visualization --
+// 8 shakers over the bed image. Each row of 2 shakers shares one signal
+// (zone_rms from the engine): head, upper back, mid back, legs.
+//
+// VIZ_EDIT_MODE = true  → shakers are always visible and draggable; the
+// current positions are shown bottom-left as ready-to-paste VIZ_ZONES lines
+// and saved in localStorage. Set to false once positions are final.
+const VIZ_EDIT_MODE = false;
+const VIZ_POS_KEY = "muvi-shaker-positions-v1";
+
+const VIZ_ZONES = [
+  { key: "headL",  zone: "head",  x: 29.4, y: 43.3, color: "#FFC97C" },
+  { key: "headR",  zone: "head",  x: 38.1, y: 38.7, color: "#FFC97C" },
+  { key: "upperL", zone: "upper", x: 40.3, y: 55.7, color: "#FF8FC9" },
+  { key: "upperR", zone: "upper", x: 48.3, y: 51.4, color: "#FF8FC9" },
+  { key: "midL",   zone: "mid",   x: 59.5, y: 58.2, color: "#7CFFC4" },
+  { key: "midR",   zone: "mid",   x: 67.7, y: 52.2, color: "#7CFFC4" },
+  { key: "legL",   zone: "legs",  x: 71.1, y: 67.9, color: "#7C9EFF" },
+  { key: "legR",   zone: "legs",  x: 79.8, y: 60.7, color: "#7C9EFF" },
+  // Stereo audio channels (speakers) — driven by the music itself.
+  { key: "audioL", zone: "left",  x: 20.7, y: 31.8, color: "#ff0505" },
+  { key: "audioR", zone: "right", x: 29.1, y: 28.0, color: "#ff0505" },
+];
+
+function loadVizPositions() {
+  if (!VIZ_EDIT_MODE) return {};
+  try {
+    return JSON.parse(localStorage.getItem(VIZ_POS_KEY) || "{}") || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function vizPosition(z) {
+  const saved = loadVizPositions()[z.key];
+  return saved ? { x: saved.x, y: saved.y } : { x: z.x, y: z.y };
+}
+
+function setShakerPosition(key, x, y) {
+  vizInstances.forEach((shakers) =>
+    shakers.forEach((sh) => {
+      if (sh.key === key) {
+        sh.wrap.style.left = `${x}%`;
+        sh.wrap.style.top = `${y}%`;
+      }
+    })
+  );
+  const pos = loadVizPositions();
+  pos[key] = { x, y };
+  try { localStorage.setItem(VIZ_POS_KEY, JSON.stringify(pos)); } catch (e) {}
+  updateVizDump();
+}
+
+function updateVizDump() {
+  if (!VIZ_EDIT_MODE) return;
+  let dump = document.getElementById("vizPosDump");
+  if (!dump) {
+    dump = document.createElement("pre");
+    dump.id = "vizPosDump";
+    dump.className = "viz-pos-dump";
+    document.body.appendChild(dump);
+  }
+  dump.textContent =
+    "EDIT MODE — drag the glowing dots. Paste into VIZ_ZONES:\n" +
+    VIZ_ZONES.map((z) => {
+      const p = vizPosition(z);
+      const key = `"${z.key}",`.padEnd(9);
+      return `{ key: ${key} zone: "${z.zone}", x: ${p.x.toFixed(1)}, y: ${p.y.toFixed(1)}, color: "${z.color}" },`;
+    }).join("\n");
+}
+
+function makeDraggable(sh, container) {
+  const hit = document.createElement("div");
+  hit.className = "shaker-hit";
+  sh.wrap.appendChild(hit);
+  let dragging = false;
+  hit.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    e.preventDefault();
+    try { hit.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  hit.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const rect = container.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+    setShakerPosition(sh.key, x, y);
+  });
+  const end = () => { dragging = false; };
+  hit.addEventListener("pointerup", end);
+  hit.addEventListener("pointercancel", end);
+}
+
+const hexToRgb = (hex) => {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+  if (!m) return { r: 160, g: 228, b: 255 };
+  return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+};
+
+const vizInstances = [];
+
+function buildViz(container) {
+  const shakers = VIZ_ZONES.map((z) => {
+    const wrap = document.createElement("div");
+    wrap.className = "shaker";
+    const pos = vizPosition(z);
+    wrap.style.left = `${pos.x}%`;
+    wrap.style.top = `${pos.y}%`;
+    for (let i = 0; i < 3; i++) {
+      const ring = document.createElement("div");
+      ring.className = "shaker-ring";
+      wrap.appendChild(ring);
+    }
+    const core = document.createElement("div");
+    core.className = "shaker-core";
+    wrap.appendChild(core);
+    container.appendChild(wrap);
+    const sh = { key: z.key, zone: z.zone, rgb: hexToRgb(z.color), wrap, level: 0 };
+    if (VIZ_EDIT_MODE) makeDraggable(sh, container);
+    return sh;
+  });
+  vizInstances.push(shakers);
+}
+
+function initViz() {
+  ["npViz", "demoViz"].forEach((id) => {
+    const c = el(id);
+    if (c) buildViz(c);
+  });
+  updateVizDump();
+}
+
+// Engine RMS (~0–0.3 typical) → 0..1 wave intensity.
+// Steep at the low end so quiet/mid signals still produce visible waves.
+function rmsToIntensity(rms) {
+  const v = Math.max(0, Number(rms) || 0);
+  return Math.max(0, Math.min(1, Math.pow(v * 5, 0.5)));
+}
+
+function applyShaker(sh) {
+  // Edit mode keeps every shaker visible so it can be dragged while idle.
+  let t = Math.max(0, Math.min(1, sh.level));
+  if (VIZ_EDIT_MODE) t = Math.max(t, 0.3);
+  const { r, g, b } = sh.rgb;
+  sh.wrap.style.opacity = VIZ_EDIT_MODE || t > 0.02 ? "1" : "0";
+  const st = sh.wrap.style;
+  // Slow, calm ripple (3.6s → 2.2s). Quantized to 0.35s steps so the running
+  // animation isn't retimed on every poll — retiming reads as stutter/clipping.
+  const dur = Math.round((3.6 - t * 1.4) / 0.35) * 0.35;
+  st.setProperty("--dur", `${dur.toFixed(2)}s`);
+  st.setProperty("--ring", `${(40 + t * 230).toFixed(1)}px`);
+  st.setProperty("--ring-color", `rgba(${r},${g},${b},${(0.4 + t * 0.55).toFixed(3)})`);
+  st.setProperty("--glow", `${(12 + t * 40).toFixed(1)}px`);
+  st.setProperty("--glow-color", `rgba(${r},${g},${b},${(0.18 + t * 0.5).toFixed(3)})`);
+  st.setProperty("--core", `${(22 + t * 44).toFixed(1)}px`);
+  st.setProperty("--core-a", `rgba(${r},${g},${b},${(0.45 + t * 0.5).toFixed(3)})`);
+  st.setProperty("--core-b", `rgba(${r},${g},${b},0)`);
+}
+
+function updateViz(s) {
+  const playing = Boolean(s && s.playing);
+  const zoneRms = s && s.zone_rms;
+  vizInstances.forEach((shakers) =>
+    shakers.forEach((sh) => {
+      let rms = 0;
+      if (playing) {
+        // Older backends don't send zone_rms — fall back to overall input level.
+        rms = zoneRms ? zoneRms[sh.zone] : Number(s.input_rms || 0);
+      }
+      const target = rmsToIntensity(rms);
+      // Gentle attack/release so wave size drifts instead of jumping,
+      // but drop quickly to zero when the signal goes fully silent.
+      const rate = target > sh.level ? 0.35 : target < 0.02 ? 0.5 : 0.15;
+      sh.level += (target - sh.level) * rate;
+      if (target === 0 && sh.level < 0.03) sh.level = 0;
+      applyShaker(sh);
+    })
+  );
+}
+
 const busyIcon = '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.35"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
 const pauseIcon = '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/>';
 const playIconSvg = '<path d="M8 5v14l11-7z" fill="currentColor"/>';
@@ -210,7 +403,8 @@ function render(s) {
   el("npAlbum").textContent = demoOn
     ? "AUX: plug in → Play · Bluetooth: Connect → play phone → Play"
     : s.track.album;
-  el("npArt").src = s.track.artwork || "assets/artwork.svg";
+
+  updateViz(s);
 
   const playBtn = el("playBtn");
   playBtn.disabled = busy;
@@ -282,7 +476,6 @@ function render(s) {
     el("demoTitle").textContent = demoTrack.title || "Demo";
     el("demoArtist").textContent = demoTrack.artist || "MUVI test track";
     el("demoAlbum").textContent = demoTrack.album || "assets/demo.wav";
-    el("demoArt").src = demoTrack.artwork || "assets/artwork.svg";
 
     const demoPlayBtn = el("demoPlayBtn");
     demoPlayBtn.disabled = demoBusy;
@@ -711,6 +904,7 @@ function wire() {
 async function boot() {
   bindApi();
   wire();
+  initViz();
   render(await api.get_state());
   setInterval(async () => {
     if (!seeking && !demoSeeking) render(await api.get_state());

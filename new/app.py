@@ -12,12 +12,16 @@ import threading
 import time
 from typing import Any
 
+# Frozen exe doubles as the audio worker (sys.executable is app.exe, not python).
+# Must run before webview/WinRT imports — WinRT in-process breaks ASIO.
+if "--engine-worker" in sys.argv:
+    import engine_worker
+
+    raise SystemExit(engine_worker.main())
+
 # Gigaport eX exposes 6 channels via ASIO — must be set before sounddevice loads.
 if sys.platform == "win32":
     os.environ.setdefault("SD_ENABLE_ASIO", "1")
-    from ensure_winrt import ensure_winrt
-
-    ensure_winrt()
 
 import webview
 
@@ -45,6 +49,10 @@ class Api:
             "highpass_hz": 200.0,
             "position": 0.0,
             "input_rms": 0.0,
+            "zone_rms": {
+                "head": 0.0, "upper": 0.0, "mid": 0.0, "legs": 0.0,
+                "left": 0.0, "right": 0.0,
+            },
             "track": {
                 "title": "Live Bluetooth",
                 "artist": "Phone audio",
@@ -123,6 +131,21 @@ class Api:
             if self.state["playing"] and self._engine.available:
                 stats = self._engine.get_runtime_stats()
                 self.state["input_rms"] = float(stats.get("input_rms", 0.0))
+                # One signal per shaker row (head, upper back, mid back, legs)
+                # plus the stereo audio channels (left, right).
+                self.state["zone_rms"] = {
+                    "head": float(stats.get("rms_head", 0.0)),
+                    "upper": float(stats.get("rms_upper_mid", 0.0)),
+                    "mid": float(stats.get("rms_mid", 0.0)),
+                    "legs": float(stats.get("rms_legs", 0.0)),
+                    "left": float(stats.get("rms_audio_left", 0.0)),
+                    "right": float(stats.get("rms_audio_right", 0.0)),
+                }
+            else:
+                self.state["zone_rms"] = {
+                    "head": 0.0, "upper": 0.0, "mid": 0.0, "legs": 0.0,
+                    "left": 0.0, "right": 0.0,
+                }
             return self._snapshot()
 
     def _schedule_paired_refresh(self, *, force: bool = False) -> None:
@@ -298,6 +321,7 @@ class Api:
         snap["track"] = dict(self.state["track"])
         snap["bluetooth"] = dict(self.state["bluetooth"])
         snap["media"] = dict(self.state.get("media") or {})
+        snap["zone_rms"] = dict(self.state.get("zone_rms") or {})
         snap["demo"] = dict(self.state.get("demo") or {})
         snap["devices"] = [dict(d) for d in self._devices]
         snap["nearby_devices"] = [dict(d) for d in self._nearby]

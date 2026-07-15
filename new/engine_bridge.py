@@ -36,11 +36,19 @@ class EngineBridge:
     def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             return
+        if getattr(sys, "frozen", False):
+            # PyInstaller build: sys.executable is app.exe; re-exec with a flag
+            # that app.py intercepts and routes to engine_worker.main().
+            cmd = [sys.executable, "--engine-worker"]
+            stderr = subprocess.DEVNULL  # windowed exe has no console to inherit
+        else:
+            cmd = [sys.executable, "-u", self._worker_path]
+            stderr = None  # inherit — show ASIO logs in the same console
         self._proc = subprocess.Popen(
-            [sys.executable, "-u", self._worker_path],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,  # inherit — show ASIO logs in the same console
+            stderr=stderr,
             text=True,
             bufsize=1,
             cwd=os.path.dirname(self._worker_path),

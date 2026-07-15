@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -694,6 +695,8 @@ class LiveAudioEngine:
             "rms_head": 0.0,
             "bass_energy": 0.0,
             "input_rms": 0.0,
+            "rms_audio_left": 0.0,
+            "rms_audio_right": 0.0,
             "generated_freq_hz": 0.0,
             "cpu_usage_estimate": 0.0,
             "progress_fraction": 0.0,
@@ -833,9 +836,15 @@ class LiveAudioEngine:
         if len(stereo) == 0:
             return
 
+        vol = float(self.volume)
+        left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
+        right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
+
         with self.lock:
             sync_ms = self.vibe_sync_ms
             self.stats["input_rms"] = input_level
+            self.stats["rms_audio_left"] = left_level
+            self.stats["rms_audio_right"] = right_level
 
         delay = self._capture_lag_samples(sync_ms)
         lag_ms = self._capture_lag_ms(sync_ms)
@@ -922,10 +931,16 @@ class LiveAudioEngine:
             return
         mono = stereo.mean(axis=1)
         input_level = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2) + 1e-10))
+        # Audio L/R reflect what actually reaches the speakers: capture × volume.
+        vol = float(self.volume)
+        left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
+        right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
 
         with self.lock:
             sync_ms = self.vibe_sync_ms
             self.stats["input_rms"] = input_level
+            self.stats["rms_audio_left"] = left_level
+            self.stats["rms_audio_right"] = right_level
 
         delay = self._capture_lag_samples(sync_ms)
         lag_ms = self._capture_lag_ms(sync_ms)
@@ -1326,7 +1341,20 @@ class LiveAudioEngine:
             }
 
     def _file_feed_loop(self) -> None:
-        """Clocked stereo feed into the same ingest path used by Live capture."""
+        """Clocked stereo feed into the same ingest path used by Live capture.
+
+        Paced against a monotonic deadline so blocks are produced at exactly
+        real-time speed. The old fixed `sleep(block * 0.92)` fed ~9% faster
+        than the output consumed; once the output ring (deque maxlen) filled,
+        every append silently dropped the oldest block — heard as periodic
+        cutting after ~15 s of demo playback.
+        """
+        # Feed a short burst up-front: ~150 ms is absorbed by the vibe-sync
+        # delay line, the rest becomes a standing cushion in the output ring
+        # so feed-thread jitter can't underrun it.
+        prefill_blocks = 10
+        next_deadline = time.monotonic()
+
         while not self._loopback_stop.is_set() and self.is_active:
             with self._file_lock:
                 pcm = self._file_pcm
@@ -1362,10 +1390,32 @@ class LiveAudioEngine:
 
             with self.lock:
                 self.stats["progress_fraction"] = frac
+                backlog = len(self._output_ring)
 
-            delay = float(len(chunk)) / float(max(1, self.input_sample_rate))
-            if self._loopback_stop.wait(timeout=max(0.001, delay * 0.92)):
-                break
+            if prefill_blocks > 0:
+                prefill_blocks -= 1
+                next_deadline = time.monotonic()
+            else:
+                # Safety valve: if the ring is more than half full (output
+                # consuming slower than expected), hold off until it drains
+                # rather than letting the deque drop blocks.
+                while backlog >= RING_MAX_BLOCKS // 2:
+                    if self._loopback_stop.wait(timeout=0.02) or not self.is_active:
+                        break
+                    with self.lock:
+                        backlog = len(self._output_ring)
+                    next_deadline = time.monotonic()
+                if self._loopback_stop.is_set() or not self.is_active:
+                    break
+
+                next_deadline += float(len(chunk)) / float(max(1, self.input_sample_rate))
+                wait_s = next_deadline - time.monotonic()
+                if wait_s > 0:
+                    if self._loopback_stop.wait(timeout=wait_s):
+                        break
+                else:
+                    # Fell behind (system stall) — resync instead of bursting.
+                    next_deadline = time.monotonic()
 
             if not loop and new_pos >= len(pcm):
                 break
@@ -1408,6 +1458,8 @@ class LiveAudioEngine:
                 "rms_head": 0.0,
                 "bass_energy": 0.0,
                 "input_rms": 0.0,
+                "rms_audio_left": 0.0,
+                "rms_audio_right": 0.0,
                 "generated_freq_hz": 0.0,
                 "cpu_usage_estimate": 0.0,
                 "progress_fraction": 0.0,

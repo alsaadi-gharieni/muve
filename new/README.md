@@ -69,3 +69,74 @@ python -c "import sys; print(sys.executable)"
 python -m pip install --force-reinstall winrt-runtime winrt-Windows.Foundation.Collections winrt-Windows.Media.Control winrt-Windows.Foundation
 python -c "import winrt.windows.foundation.collections; print('OK')"
 python app.py
+
+
+
+
+Option 1: Disable the Windows Update service (works on Pro and Home)
+Press Win + R.
+Type:
+services.msc
+Find Windows Update.
+Double-click it.
+Click Stop.
+Set Startup type to Disabled.
+Click Apply → OK.
+To prevent Windows from restarting it:
+Go to the Recovery tab.
+Set First failure, Second failure, and Subsequent failures to Take No Action.
+Click Apply.
+
+
+
+
+
+Yes. If this is a dedicated production tablet, you can run the following commands as Administrator.
+First, stop and disable the update-related services:
+sc stop wuauserv
+sc config wuauserv start= disabled
+
+sc stop UsoSvc
+sc config UsoSvc start= disabled
+
+sc stop bits
+sc config bits start= disabled
+
+sc stop dosvc
+sc config dosvc start= disabled
+However, on Windows 10 22H2, this alone is usually not enough because Windows Update Medic Service (WaaSMedicSvc) is protected and will often re-enable Windows Update.
+If you try:
+sc config WaaSMedicSvc start= disabled
+you'll most likely get:
+[SC] ChangeServiceConfig FAILED 5:
+Access is denied.
+That's by design.
+To truly disable updates permanently
+You need TrustedInstaller permissions to disable WaaSMedicSvc. There is no built-in CMD command that can permanently do this because Windows protects the service.
+You have two practical options:
+Use a TrustedInstaller tool (such as NSudo) and then run:
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc" /v Start /t REG_DWORD /d 4 /f
+(4 = Disabled)
+Use Windows Update Blocker (WUB), which automates the required changes.
+If your goal is a production kiosk where updates should never run, these are the reliable approaches. Microsoft intentionally prevents standard administrator commands from permanently disabling the update infrastructure, so there isn't a single CMD command that can bypass those protections.
+
+
+
+
+
+pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" app.py
+
+
+
+
+
+@echo off
+setlocal
+
+timeout /t 15 /nobreak >nul
+cd /d "%~dp0app"
+
+"C:\Users\RLX-Satori\AppData\Local\Programs\Python\Python313\python.exe" ^
+"%~dp0app\app.py" > "%~dp0startup_log.txt" 2>&1
+
+endlocal

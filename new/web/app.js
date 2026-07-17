@@ -202,17 +202,18 @@ const VIZ_EDIT_MODE = false;
 const VIZ_POS_KEY = "muvi-shaker-positions-v1";
 
 const VIZ_ZONES = [
-  { key: "headL",  zone: "head",  x: 29.4, y: 43.3, color: "#FFC97C" },
-  { key: "headR",  zone: "head",  x: 38.1, y: 38.7, color: "#FFC97C" },
-  { key: "upperL", zone: "upper", x: 40.3, y: 55.7, color: "#FF8FC9" },
-  { key: "upperR", zone: "upper", x: 48.3, y: 51.4, color: "#FF8FC9" },
-  { key: "midL",   zone: "mid",   x: 59.5, y: 58.2, color: "#7CFFC4" },
-  { key: "midR",   zone: "mid",   x: 67.7, y: 52.2, color: "#7CFFC4" },
-  { key: "legL",   zone: "legs",  x: 71.1, y: 67.9, color: "#7C9EFF" },
-  { key: "legR",   zone: "legs",  x: 79.8, y: 60.7, color: "#7C9EFF" },
+  { key: "audioL", zone: "left",  x: 45.1, y: 13.8, color: "#EE82EE" },
+  { key: "audioR", zone: "right", x: 53.5, y: 13.8, color: "#EE82EE" },
+  { key: "headL",  zone: "head",  x: 45.3, y: 27.0, color: "#008000" },
+  { key: "headR",  zone: "head",  x: 52.9, y: 26.7, color: "#008000" },
+  { key: "upperL", zone: "upper", x: 45.5, y: 44.4, color: "#FFFF00" },
+  { key: "upperR", zone: "upper", x: 53.2, y: 44.3, color: "#FFFF00" },
+  { key: "midL",   zone: "mid",   x: 45.0, y: 58.9, color: "#FFA500" },
+  { key: "midR",   zone: "mid",   x: 53.5, y: 58.7, color: "#FFA500" },
+  { key: "legL",   zone: "legs",  x: 46.1, y: 80.2, color: "#FF0000" },
+  { key: "legR",   zone: "legs",  x: 53.0, y: 80.1, color: "#FF0000" },
   // Stereo audio channels (speakers) — driven by the music itself.
-  { key: "audioL", zone: "left",  x: 20.7, y: 31.8, color: "#ff0505" },
-  { key: "audioR", zone: "right", x: 29.1, y: 28.0, color: "#ff0505" },
+ 
 ];
 
 function loadVizPositions() {
@@ -300,16 +301,29 @@ function buildViz(container) {
     const pos = vizPosition(z);
     wrap.style.left = `${pos.x}%`;
     wrap.style.top = `${pos.y}%`;
+    const rings = [];
     for (let i = 0; i < 3; i++) {
       const ring = document.createElement("div");
       ring.className = "shaker-ring";
+      ring.style.setProperty("--wave-alpha", i === 0 ? "1" : "0");
       wrap.appendChild(ring);
+      rings.push(ring);
     }
     const core = document.createElement("div");
     core.className = "shaker-core";
     wrap.appendChild(core);
     container.appendChild(wrap);
-    const sh = { key: z.key, zone: z.zone, rgb: hexToRgb(z.color), wrap, level: 0 };
+    const sh = {
+      key: z.key,
+      zone: z.zone,
+      rgb: hexToRgb(z.color),
+      wrap,
+      rings,
+      core,
+      level: 0,
+      waveAlpha: [1, 0, 0],
+      playbackRate: 1,
+    };
     if (VIZ_EDIT_MODE) makeDraggable(sh, container);
     return sh;
   });
@@ -335,19 +349,39 @@ function applyShaker(sh) {
   // Edit mode keeps every shaker visible so it can be dragged while idle.
   let t = Math.max(0, Math.min(1, sh.level));
   if (VIZ_EDIT_MODE) t = Math.max(t, 0.3);
+  const sizeT = t;
   const { r, g, b } = sh.rgb;
   sh.wrap.style.opacity = VIZ_EDIT_MODE || t > 0.02 ? "1" : "0";
   const st = sh.wrap.style;
-  // Slow, calm ripple (3.6s → 2.2s). Quantized to 0.35s steps so the running
-  // animation isn't retimed on every poll — retiming reads as stutter/clipping.
-  const dur = Math.round((3.6 - t * 1.4) / 0.35) * 0.35;
-  st.setProperty("--dur", `${dur.toFixed(2)}s`);
-  st.setProperty("--ring", `${(40 + t * 230).toFixed(1)}px`);
-  st.setProperty("--ring-color", `rgba(${r},${g},${b},${(0.4 + t * 0.55).toFixed(3)})`);
-  st.setProperty("--glow", `${(12 + t * 40).toFixed(1)}px`);
-  st.setProperty("--glow-color", `rgba(${r},${g},${b},${(0.18 + t * 0.5).toFixed(3)})`);
-  st.setProperty("--core", `${(22 + t * 44).toFixed(1)}px`);
-  st.setProperty("--core-a", `rgba(${r},${g},${b},${(0.45 + t * 0.5).toFixed(3)})`);
+
+  // Keep the display clean when every channel is strong: one wave normally,
+  // at most two above 75%, and never a third simultaneous wave.
+  const waveTarget = [1, t >= 0.75 ? 1 : 0, 0];
+  sh.waveAlpha = sh.waveAlpha.map((a, i) => a + (waveTarget[i] - a) * 0.28);
+  sh.rings.forEach((ring, i) => {
+    ring.style.setProperty("--wave-alpha", sh.waveAlpha[i].toFixed(3));
+  });
+
+  // Speed via playbackRate — does not restart the CSS animation.
+  // ~0.65x at quiet → ~1.3x at full signal. Combined with the shorter
+  // animation lifetime, stopped zones clear before another zone takes over.
+  const rate = 0.65 + t * 0.65;
+  if (Math.abs(rate - sh.playbackRate) > 0.03) {
+    sh.playbackRate = rate;
+    try {
+      sh.wrap.getAnimations({ subtree: true }).forEach((anim) => {
+        anim.playbackRate = rate;
+      });
+    } catch (e) {}
+  }
+
+  // Size via scale (not width/height) so the ripple stays locked on center.
+  st.setProperty("--ring-scale", (0.25 + sizeT * 0.65).toFixed(3));
+  st.setProperty("--ring-color", `rgba(${r},${g},${b},${(0.38 + t * 0.42).toFixed(3)})`);
+  st.setProperty("--glow", `${(8 + t * 20).toFixed(1)}px`);
+  st.setProperty("--glow-color", `rgba(${r},${g},${b},${(0.16 + t * 0.34).toFixed(3)})`);
+  st.setProperty("--core-scale", (0.45 + sizeT * 0.45).toFixed(3));
+  st.setProperty("--core-a", `rgba(${r},${g},${b},${(0.72 + t * 0.28).toFixed(3)})`);
   st.setProperty("--core-b", `rgba(${r},${g},${b},0)`);
 }
 
@@ -364,7 +398,7 @@ function updateViz(s) {
       const target = rmsToIntensity(rms);
       // Gentle attack/release so wave size drifts instead of jumping,
       // but drop quickly to zero when the signal goes fully silent.
-      const rate = target > sh.level ? 0.35 : target < 0.02 ? 0.5 : 0.15;
+      const rate = target > sh.level ? 0.4 : target < 0.02 ? 0.7 : 0.25;
       sh.level += (target - sh.level) * rate;
       if (target === 0 && sh.level < 0.03) sh.level = 0;
       applyShaker(sh);

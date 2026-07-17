@@ -174,47 +174,55 @@ html, body {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  opacity: 0.9;
+  /* z-index: 2; */
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
 }
 .shaker {
   position: absolute;
+  /* z-index: 1; */
   width: 0;
   height: 0;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.35s ease;
+  transition: opacity 0.2s ease-out;
 }
 .shaker-ring {
   position: absolute;
   left: 0;
   top: 0;
-  width: var(--ring, 20px);
-  height: var(--ring, 20px);
+  /* Fixed base size — intensity scales via --ring-scale so the center
+     never drifts (animating width/height + translate(-50%) causes a wobble). */
+  width: 120px;
+  height: 120px;
+  margin: 0;
   border-radius: 50%;
-  border: 3px solid var(--ring-color, transparent);
-  transform: translate(-50%, -50%);
-  animation: shaker-ripple var(--dur, 3.6s) ease-out infinite;
-  transition: width 0.45s ease, height 0.45s ease,
-    border-color 0.45s ease, box-shadow 0.45s ease;
+  border: 5px solid var(--ring-color, transparent);
+  transform: translate(-50%, -50%) scale(var(--ring-scale, 0.35));
+  transform-origin: center center;
+  /* Duration stays fixed — speed is changed via playbackRate (no restart / cut). */
+  animation: shaker-ripple 1.8s ease-out infinite;
+  will-change: transform, opacity;
 }
 .shaker-ring:nth-child(1) {
   box-shadow: 0 0 var(--glow, 4px) var(--glow-color, transparent);
 }
-.shaker-ring:nth-child(2) { animation-delay: calc(var(--dur, 3.6s) / -3); }
-.shaker-ring:nth-child(3) { animation-delay: calc(var(--dur, 3.6s) / -3 * 2); }
+.shaker-ring:nth-child(2) { animation-delay: calc(-1.8s / 3); }
+.shaker-ring:nth-child(3) { animation-delay: calc(-1.8s / 3 * 2); }
 .shaker-core {
   position: absolute;
   left: 0;
   top: 0;
-  width: var(--core, 12px);
-  height: var(--core, 12px);
+  width: 70px;
+  height: 70px;
   border-radius: 50%;
   background: radial-gradient(circle, var(--core-a, transparent) 0%, var(--core-b, transparent) 72%);
-  transform: translate(-50%, -50%);
-  animation: shaker-core-pulse var(--dur, 3.6s) ease-in-out infinite;
-  transition: width 0.45s ease, height 0.45s ease;
+  transform: translate(-50%, -50%) scale(var(--core-scale, 0.5));
+  transform-origin: center center;
+  animation: shaker-core-pulse 1.8s ease-in-out infinite;
+  will-change: transform;
 }
 /* Edit-mode drag handle + position readout */
 .shaker-hit {
@@ -248,13 +256,23 @@ html, body {
 }
 
 @keyframes shaker-ripple {
-  0% { transform: translate(-50%, -50%) scale(0.12); opacity: 1; }
-  65% { opacity: 0.4; }
-  100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+  0% {
+    transform: translate(-50%, -50%) scale(calc(var(--ring-scale, 0.35) * 0.12));
+    opacity: var(--wave-alpha, 1);
+  }
+  65% { opacity: calc(var(--wave-alpha, 1) * 0.4); }
+  100% {
+    transform: translate(-50%, -50%) scale(var(--ring-scale, 0.35));
+    opacity: 0;
+  }
 }
 @keyframes shaker-core-pulse {
-  0%, 100% { transform: translate(-50%, -50%) scale(0.9); }
-  50% { transform: translate(-50%, -50%) scale(1.18); }
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(calc(var(--core-scale, 0.5) * 0.9));
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(calc(var(--core-scale, 0.5) * 1.18));
+  }
 }
 
 /* Controls panel pinned at the bottom */
@@ -623,8 +641,20 @@ html, body {
 
 /* ---------- 1920×1080 target (fullscreen tablet / desktop) ---------- */
 @media (min-width: 1800px) and (min-height: 1000px) {
-  .np { padding: 24px 64px 32px; gap: 12px; }
-  .np-info { max-width: 1240px; }
+  .np { padding: 18px 48px 24px; gap: 12px; }
+
+  /* Let the bed use the full screen height. The controls sit over the
+     transparent lower part of the artwork instead of shrinking it. */
+  .np-art-col {
+    position: absolute;
+    inset: 0;
+  }
+  .np-art-wrap { height: 100%; }
+  .np-info {
+    max-width: 1240px;
+    margin-top: auto;
+    z-index: 6;
+  }
   .np-title { font-size: 30px; }
   .np-artist { font-size: 17px; }
 }

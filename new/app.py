@@ -551,7 +551,7 @@ class Api:
 
     def set_vibration(self, value: float) -> dict[str, Any]:
         with self._lock:
-            self.state["vibration"] = max(0.0, min(2.0, float(value)))
+            self.state["vibration"] = max(0.0, min(1.0, float(value)))
         self._engine.set_vibration(self.state["vibration"])
         with self._lock:
             return self._snapshot()

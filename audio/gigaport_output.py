@@ -8,12 +8,20 @@ from typing import Any
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import butter, sosfilt
 
 from audio.audio_utils import ensure_stereo, to_mono
 from audio.cinema_8d import (
     apply_8d_stereo_pan,
     apply_8d_vibration_motion,
     drum_impact_envelope,
+)
+from audio.live_input import (
+    MUVI_FILTER_ORDER,
+    MUVI_HIGHPASS_HZ,
+    MUVI_LIMIT_DB,
+    MUVI_LOWPASS_HZ,
+    MUVI_MASTER_GAIN,
 )
 from audio.vibration_engine import VibrationEngine
 from audio.vibration_presets import (
@@ -241,6 +249,43 @@ class GigaportOutput:
             layers["generated_freq"],
         )
 
+    def _build_muvi_layers(
+        self,
+        original: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """muvi-player-style tactile layers: same band-limit filter as Bluetooth live mode.
+
+        Band-limits the original stereo (high-pass + low-pass), then maps
+        L -> head/legs and R -> upper_mid/mid, matching LiveStreamProcessor so
+        file playback and Bluetooth can be compared directly.
+        """
+        stereo = ensure_stereo(original).astype(np.float32)
+        left = stereo[:, 0]
+        right = stereo[:, 1]
+
+        nyq = self.sample_rate * 0.5
+        hp = max(1.0, min(MUVI_HIGHPASS_HZ, nyq - 10.0))
+        lp = max(hp + 1.0, min(MUVI_LOWPASS_HZ, nyq - 1.0))
+        sos = np.vstack(
+            (
+                butter(MUVI_FILTER_ORDER, hp / nyq, btype="high", output="sos"),
+                butter(MUVI_FILTER_ORDER, lp / nyq, btype="low", output="sos"),
+            )
+        )
+
+        left_f = sosfilt(sos, left)
+        right_f = sosfilt(sos, right)
+        limit = 10.0 ** (MUVI_LIMIT_DB / 20.0)
+
+        head = np.clip(left_f * MUVI_MASTER_GAIN, -limit, limit).astype(np.float32)
+        upper_mid = np.clip(right_f * MUVI_MASTER_GAIN, -limit, limit).astype(np.float32)
+        legs = np.clip(left_f * MUVI_MASTER_GAIN, -limit, limit).astype(np.float32)
+        mid = np.clip(right_f * MUVI_MASTER_GAIN, -limit, limit).astype(np.float32)
+
+        bass_energy = np.zeros(len(left_f), dtype=np.float32)
+        generated_freq = np.zeros(len(left_f), dtype=np.float32)
+        return legs, mid, upper_mid, head, bass_energy, generated_freq
+
     def _set_vibration_layers(
         self,
         legs: np.ndarray,
@@ -294,16 +339,7 @@ class GigaportOutput:
             self.sample_rate = sample_rate
             self.cinema_8d_enabled = cinema_8d
             self._set_speaker_program(original, cinema_8d=cinema_8d)
-            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
-                bass=bass,
-                drums=drums,
-                other=other,
-                synthetic_vibro=synthetic_vibro,
-                segmentation_id=segmentation_id,
-                frequency_profile_id=frequency_profile_id,
-                cinema_8d=cinema_8d,
-                synthetic_type_id=synthetic_type_id,
-            )
+            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_muvi_layers(original)
             self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
             if reset_playhead:
                 self.playhead = 0
@@ -344,16 +380,8 @@ class GigaportOutput:
             elif self.speaker_program_raw is not None:
                 self.speaker_program = self.speaker_program_raw.copy()
 
-            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_vibration_layers(
-                bass=bass,
-                drums=drums,
-                other=other,
-                synthetic_vibro=synthetic_vibro,
-                segmentation_id=segmentation_id,
-                frequency_profile_id=frequency_profile_id,
-                cinema_8d=cinema_8d,
-                synthetic_type_id=synthetic_type_id,
-            )
+            source = self.speaker_program_raw if self.speaker_program_raw is not None else self.speaker_program
+            legs, mid, upper_mid, head, bass_energy, generated_freq = self._build_muvi_layers(source)
             self._set_vibration_layers(legs, mid, upper_mid, head, bass_energy, generated_freq)
             self.playhead = min(saved_playhead, max(self.total_frames - 1, 0))
             self.stats["progress_fraction"] = saved_progress

@@ -28,6 +28,7 @@ from sounddevice import PortAudioError
 
 from audio.gigaport_output import GigaportOutput
 from audio.live_input import (
+    DEFAULT_VIBE_SYNC_MS,
     LiveAudioEngine,
     find_gigaport_loopback_device,
     list_capture_devices,
@@ -178,6 +179,30 @@ class MainWindow(QMainWindow):
         self.live_signal_label = QLabel("")
         self.live_signal_label.setWordWrap(True)
         live_layout.addWidget(self.live_signal_label)
+
+        sync_row = QHBoxLayout()
+        sync_row.addWidget(QLabel("Vibration sync:"))
+        self.vibe_sync_slider = QSlider()
+        self.vibe_sync_slider.setOrientation(1)
+        self.vibe_sync_slider.setRange(-4000, 4000)
+        self.vibe_sync_slider.setValue(int(DEFAULT_VIBE_SYNC_MS))
+        self.vibe_sync_slider.setToolTip(
+            "Slide right (+) to delay vibration (vibration later).\n"
+            "Slide left (-) to reduce delay (vibration earlier)."
+        )
+        self.vibe_sync_slider.valueChanged.connect(self._set_vibe_sync)
+        sync_row.addWidget(self.vibe_sync_slider, 1)
+        self.vibe_sync_label = QLabel(f"{int(DEFAULT_VIBE_SYNC_MS)} ms")
+        sync_row.addWidget(self.vibe_sync_label)
+        live_layout.addLayout(sync_row)
+
+        sync_hint = QLabel(
+            "Listen on Gigaport ch1-2. Slide right (+) = vibration later; slide left (-) = vibration earlier "
+            "(the app delays the audio instead). Watch the audio/vibe delays in the status line. "
+            "In APC mode only the vibration can be delayed (audio is not app-controlled)."
+        )
+        sync_hint.setWordWrap(True)
+        live_layout.addWidget(sync_hint)
 
         live_transport = QHBoxLayout()
         self.live_start_btn = QPushButton("Start Live")
@@ -537,6 +562,21 @@ class MainWindow(QMainWindow):
         self.engine.set_volume(volume)
         self.live_engine.set_volume(volume)
 
+    def _set_vibe_sync(self, value: int) -> None:
+        if value > 0:
+            self.vibe_sync_label.setText(f"+{self._format_sync_ms(value)} (later)")
+        elif value < 0:
+            self.vibe_sync_label.setText(f"-{self._format_sync_ms(abs(value))} (earlier)")
+        else:
+            self.vibe_sync_label.setText("0 ms")
+        self.live_engine.set_vibe_sync_ms(float(value))
+
+    @staticmethod
+    def _format_sync_ms(ms: int) -> str:
+        if abs(ms) >= 1000:
+            return f"{abs(ms) / 1000:.1f} s"
+        return f"{ms} ms"
+
     def _zone_intensity_values(self) -> dict[str, float]:
         return {
             "mid": self.zone_sliders["mid"].value() / 100.0,
@@ -623,6 +663,7 @@ class MainWindow(QMainWindow):
         self.engine.stop()
         self.engine.release_output_device()
         self.live_engine.set_volume(self.volume_slider.value() / 100.0)
+        self.live_engine.set_vibe_sync_ms(float(self.vibe_sync_slider.value()))
         self._apply_zone_intensities()
 
         vibration_overlay = self.apc_overlay_checkbox.isChecked()
@@ -668,12 +709,15 @@ class MainWindow(QMainWindow):
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.live_status_label.setText(
-            f"Live vibration: ON ({'APC overlay' if vibration_overlay else 'full 6ch'})"
+            "Live vibration: ON (Gigaport ch3-6 tactile only)"
+            if vibration_overlay
+            else "Live: ON (audio Gigaport ch1-2, tactile ch3-6)"
         )
         self.file_label.setText(
             "Live vibration active — Stop Live stops vibration only"
             if vibration_overlay
-            else "Live Bluetooth / phone audio active"
+            else "Live active — audio + tactile both play through Gigaport (listen on ch1-2). "
+            "Use the sync slider to shift vibration earlier/later."
         )
 
     def _stop_live_audio(self) -> None:
@@ -705,10 +749,14 @@ class MainWindow(QMainWindow):
 
         if self.live_active:
             input_rms = stats.get("input_rms", 0.0)
+            vibe_lag = stats.get("vibe_lag_ms", 0.0)
+            audio_lag = stats.get("audio_lag_ms", 0.0)
+            sync_ms = stats.get("vibe_sync_ms", 0.0)
             if input_rms > 0.002:
                 self._live_silent_ticks = 0
                 self.live_signal_label.setText(
-                    f"✓ Receiving audio (input level {input_rms:.3f}) — vibration should be active on Gigaport."
+                    f"✓ Receiving audio (input {input_rms:.3f}) — "
+                    f"sync {sync_ms:+.0f} ms (audio +{audio_lag:.0f} ms / vibe +{vibe_lag:.0f} ms)"
                 )
             else:
                 self._live_silent_ticks += 1

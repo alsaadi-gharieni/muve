@@ -115,6 +115,8 @@ def start_demo_audio(
     highpass_hz: float = 30.0,
     cutoff_hz: float = 200.0,
     path: str | None = None,
+    vibration_output_index: int | None = None,
+    audio_output_index: int | None = None,
     loop: bool = True,
 ) -> dict[str, Any]:
     """Play demo.wav through LiveAudioEngine → Gigaport (same as Bluetooth Live)."""
@@ -134,20 +136,31 @@ def start_demo_audio(
         }
     )
 
-    devices = _gigaport.list_output_devices(min_channels=6)
-    if not devices:
-        raise RuntimeError(
-            "No 6-channel output device is available.\n\n"
-            "Connect Gigaport eX via USB and install the ESI ASIO driver."
-        )
-    output_index = devices[0]["index"]
-    output_name = (
-        f"{devices[0]['name']} ({devices[0]['channels']} ch, "
-        f"{devices[0]['hostapi']}, #{output_index})"
+    from live_audio import _pick_output_devices
+
+    output_dev, audio_dev, layout, _pick_meta = _pick_output_devices(
+        vibration_index=vibration_output_index,
+        audio_index=audio_output_index,
     )
+    output_index = output_dev["index"]
+    audio_output_index = audio_dev["index"] if audio_dev is not None else None
+    output_name = (
+        f"{output_dev['name']} ({output_dev.get('probed_channels', output_dev['channels'])} ch, "
+        f"{output_dev['hostapi']}, #{output_index})"
+    )
+    if audio_dev is not None and audio_output_index is not None:
+        output_name += (
+            f" + Audio {audio_dev['name']} ({audio_dev['channels']} ch, "
+            f"{audio_dev['hostapi']}, #{audio_output_index})"
+        )
 
     _gigaport.stop()
     _gigaport.release_output_device()
+    _engine.set_output_layout(layout)
+    _engine.set_output_channel_plan(
+        vibration_channels=int(output_dev.get("probed_channels", 8 if layout == "dual_native" else 6)),
+        audio_channels=int(audio_dev.get("probed_channels", 4)) if audio_dev else None,
+    )
     _engine.set_volume(volume)
     _engine.set_vibe_sync_ms(vibe_sync_ms)
     _engine.set_zone_intensities(mid=mid, legs=legs, upper=upper, head=head)
@@ -160,7 +173,13 @@ def start_demo_audio(
     )
 
     try:
-        _engine.start_from_pcm(pcm, sr, output_index, loop=loop)
+        _engine.start_from_pcm(
+            pcm,
+            sr,
+            output_index,
+            audio_output_device_index=audio_output_index,
+            loop=loop,
+        )
     except (PortAudioError, RuntimeError, OSError) as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -170,6 +189,8 @@ def start_demo_audio(
         "output_index": output_index,
         "output_name": output_name,
         "mode": "demo",
+        "output_layout": layout,
+        "audio_output_channels": int(audio_dev.get("probed_channels", audio_dev.get("channels", 0))) if audio_dev else 0,
         "duration": duration,
         "path": resolved,
         "title": _demo_meta["title"],

@@ -23,6 +23,7 @@ from audio.live_input import (
     MUVI_LOWPASS_HZ,
     MUVI_MASTER_GAIN,
 )
+from audio.gigaport_routing import DUAL_GIGAPORT_CHANNELS, is_asio4all_name
 from audio.vibration_engine import VibrationEngine
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
@@ -97,7 +98,8 @@ class GigaportOutput:
                 continue
             name = str(dev["name"])
             is_gigaport = "gigaport" in name.lower()
-            if out_ch < min_channels and not is_gigaport:
+            is_asio4all = is_asio4all_name(name)
+            if out_ch < min_channels and not is_gigaport and not is_asio4all:
                 continue
             api_name = str(hostapis[int(dev["hostapi"])]["name"])
             devices.append(
@@ -107,10 +109,13 @@ class GigaportOutput:
                     "channels": out_ch,
                     "hostapi": api_name,
                     "is_gigaport": is_gigaport,
+                    "is_asio4all": is_asio4all,
+                    "dual_capable": is_asio4all and out_ch >= DUAL_GIGAPORT_CHANNELS,
                 }
             )
         devices.sort(
             key=lambda d: (
+                not d.get("dual_capable", False),
                 not d.get("is_gigaport", False),
                 "asio" not in d.get("hostapi", "").lower(),
                 -int(d.get("channels", 0)),

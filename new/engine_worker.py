@@ -1,4 +1,4 @@
-"""Runs live_audio.py in a clean process (WinRT in UI process breaks ASIO).
+"""Runs live_audio.py in a clean process (WinRT in UI process can break audio I/O).
 
 stdout = JSON only (one object per line). All logs go to stderr.
 """
@@ -10,9 +10,6 @@ import os
 import sys
 import traceback
 from typing import Any
-
-if sys.platform == "win32":
-    os.environ.setdefault("SD_ENABLE_ASIO", "1")
 
 # Keep a private handle for JSON replies; divert all other prints to stderr.
 _JSON_OUT = sys.stdout
@@ -29,9 +26,11 @@ from demo_audio import (  # noqa: E402
     start_demo_audio,
 )
 from live_audio import (  # noqa: E402
+    get_audio_settings,
     get_runtime_stats,
     is_active,
     set_cutoff_hz,
+    set_speaker_route,
     set_vibration,
     set_volume,
     start_live_audio,
@@ -70,6 +69,9 @@ def main() -> int:
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     vibration_overlay=False,
                     prefer_bluetooth=bool(msg.get("prefer_bluetooth", False)),
+                    speaker_route=str(msg.get("speaker_route", "headphones")),
+                    vibration_output_index=msg.get("vibration_output_index"),
+                    audio_output_index=msg.get("audio_output_index"),
                 )
                 print(
                     f"[engine_worker] START LIVE ok — capture={result.get('capture')!r} "
@@ -89,6 +91,8 @@ def main() -> int:
                     head=v,
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     path=msg.get("path"),
+                    vibration_output_index=msg.get("vibration_output_index"),
+                    audio_output_index=msg.get("audio_output_index"),
                     loop=bool(msg.get("loop", True)),
                 )
                 print(
@@ -123,6 +127,25 @@ def main() -> int:
             elif cmd == "set_cutoff_hz" or cmd == "set_highpass_hz":
                 set_cutoff_hz(float(msg.get("value", 200.0)))
                 _reply({"ok": True})
+
+            elif cmd == "set_speaker_route":
+                route = str(msg.get("route", "headphones"))
+                if route not in ("headphones", "secondary"):
+                    _reply({"ok": False, "error": f"bad speaker route: {route}"})
+                else:
+                    set_speaker_route(route)  # type: ignore[arg-type]
+                    _reply({"ok": True, "speaker_route": route})
+
+            elif cmd == "audio_settings":
+                settings = get_audio_settings(
+                    active=is_active(),
+                    output_layout=msg.get("output_layout"),
+                    vibration_index=msg.get("vibration_output_index"),
+                    audio_index=msg.get("audio_output_index"),
+                    output_name=msg.get("output_name"),
+                    engine_error=msg.get("engine_error"),
+                )
+                _reply({"ok": True, **settings})
 
             elif cmd == "stats":
                 _reply({"ok": True, "stats": get_runtime_stats(), "running": is_active()})

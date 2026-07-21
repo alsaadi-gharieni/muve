@@ -1,9 +1,4 @@
-"""Start Live bridge — spawns engine_worker in a clean process.
-
-The UI process loads WinRT (Bluetooth). That breaks PortAudio ASIO in-process
-("Failed to load ASIO driver"). The old PyQt app never mixed WinRT + ASIO;
-APC was a separate process. We do the same: audio lives in engine_worker.py.
-"""
+"""Start Live bridge — spawns engine_worker in a clean process."""
 
 from __future__ import annotations
 
@@ -22,6 +17,9 @@ class EngineBridge:
         self.capture_name: str | None = None
         self.output_index: int | None = None
         self.output_name: str | None = None
+        self.output_layout: str | None = None
+        self.vibration_output_index: int | None = None
+        self.audio_output_index: int | None = None
         self._running = False
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
@@ -43,7 +41,7 @@ class EngineBridge:
             stderr = subprocess.DEVNULL  # windowed exe has no console to inherit
         else:
             cmd = [sys.executable, "-u", self._worker_path]
-            stderr = None  # inherit — show ASIO logs in the same console
+            stderr = None  # inherit — show worker logs in the same console
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -52,7 +50,7 @@ class EngineBridge:
             text=True,
             bufsize=1,
             cwd=os.path.dirname(self._worker_path),
-            env={**os.environ, "SD_ENABLE_ASIO": "1", "PYTHONUNBUFFERED": "1"},
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
         ready = self._read()
         if not ready.get("ok"):
@@ -79,12 +77,48 @@ class EngineBridge:
                 print(f"[engine_bridge] bad JSON (ignored): {line[:120]}")
                 continue
 
-    def _send(self, msg: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _friendly_start_error(err: str) -> str:
+        low = err.lower()
+        if "worker exited" in low or "readline" in low or "nonetype" in low:
+            return (
+                "Audio device did not respond in time (timed out). "
+                "Unplug/replug the Gigaport(s), then try again. "
+                f"({err})"
+            )
+        return err
+
+    def _force_kill_proc(self) -> None:
+        """Hard-kill the worker without nulling self._proc.
+
+        Used by the start watchdog: killing the process makes the pending
+        readline() return EOF so _read() raises instead of hanging forever.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _send(self, msg: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         self._ensure_worker()
         assert self._proc is not None and self._proc.stdin is not None
         self._proc.stdin.write(json.dumps(msg) + "\n")
         self._proc.stdin.flush()
-        return self._read()
+        if timeout is None:
+            return self._read()
+        # Watchdog: if the worker stalls opening a device, kill it so the UI
+        # gets a clear error instead of an endless "loading" spinner.
+        watchdog = threading.Timer(timeout, self._force_kill_proc)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            return self._read()
+        finally:
+            watchdog.cancel()
 
     def start_live(
         self,
@@ -93,6 +127,9 @@ class EngineBridge:
         cutoff_hz: float = 200.0,
         highpass_hz: float | None = None,
         prefer_bluetooth: bool = False,
+        speaker_route: str = "headphones",
+        vibration_output_index: int | None = None,
+        audio_output_index: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._running:
@@ -103,7 +140,7 @@ class EngineBridge:
                     "output_name": self.output_name,
                 }
             try:
-                # Fresh worker each Start Live — clean ASIO load, like restarting old app.
+                # Fresh worker each Start Live for a clean audio backend state.
                 self._kill_worker()
                 if highpass_hz is not None:
                     cutoff_hz = float(highpass_hz)
@@ -114,22 +151,20 @@ class EngineBridge:
                         "vibration": float(vibration),
                         "cutoff_hz": float(cutoff_hz),
                         "prefer_bluetooth": bool(prefer_bluetooth),
-                    }
+                        "speaker_route": str(speaker_route),
+                        "vibration_output_index": vibration_output_index,
+                        "audio_output_index": audio_output_index,
+                    },
+                    timeout=20.0,
                 )
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
                 self._running = False
                 self._kill_worker()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": self._friendly_start_error(str(exc))}
 
             if not result.get("ok"):
                 err = str(result.get("error") or "start failed")
-                if "asio" in err.lower():
-                    err = (
-                        "ASIO failed in audio worker. Close APC and the old muve app, "
-                        "then Play again. "
-                        f"({err})"
-                    )
                 self.last_error = err
                 self._running = False
                 return {"ok": False, "error": err}
@@ -137,6 +172,9 @@ class EngineBridge:
             self.capture_name = result.get("capture")
             self.output_index = result.get("output_index")
             self.output_name = result.get("output_name")
+            self.output_layout = result.get("output_layout")
+            self.vibration_output_index = vibration_output_index
+            self.audio_output_index = audio_output_index
             self._running = True
             self.last_error = None
             mode = result.get("mode")
@@ -150,6 +188,9 @@ class EngineBridge:
                 "output_index": self.output_index,
                 "output_name": self.output_name,
                 "mode": mode,
+                "output_layout": result.get("output_layout"),
+                "audio_output_channels": result.get("audio_output_channels"),
+                "speaker_route": result.get("speaker_route"),
             }
 
     def start_demo(
@@ -160,6 +201,8 @@ class EngineBridge:
         highpass_hz: float | None = None,
         path: str | None = None,
         loop: bool = True,
+        vibration_output_index: int | None = None,
+        audio_output_index: int | None = None,
     ) -> dict[str, Any]:
         """Play assets/demo.wav through the same Gigaport vibration path."""
         with self._lock:
@@ -172,25 +215,21 @@ class EngineBridge:
                     "volume": float(volume),
                     "vibration": float(vibration),
                     "cutoff_hz": float(cutoff_hz),
+                    "vibration_output_index": vibration_output_index,
+                    "audio_output_index": audio_output_index,
                     "loop": bool(loop),
                 }
                 if path:
                     msg["path"] = path
-                result = self._send(msg)
+                result = self._send(msg, timeout=20.0)
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
                 self._running = False
                 self._kill_worker()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": self._friendly_start_error(str(exc))}
 
             if not result.get("ok"):
                 err = str(result.get("error") or "demo start failed")
-                if "asio" in err.lower():
-                    err = (
-                        "ASIO failed in audio worker. Close APC and the old muve app, "
-                        "then Play again. "
-                        f"({err})"
-                    )
                 self.last_error = err
                 self._running = False
                 return {"ok": False, "error": err}
@@ -198,6 +237,9 @@ class EngineBridge:
             self.capture_name = result.get("capture")
             self.output_index = result.get("output_index")
             self.output_name = result.get("output_name")
+            self.output_layout = result.get("output_layout")
+            self.vibration_output_index = vibration_output_index
+            self.audio_output_index = audio_output_index
             self._running = True
             self.last_error = None
             print(
@@ -210,6 +252,8 @@ class EngineBridge:
                 "output_index": self.output_index,
                 "output_name": self.output_name,
                 "mode": "demo",
+                "output_layout": result.get("output_layout"),
+                "audio_output_channels": result.get("audio_output_channels"),
                 "duration": result.get("duration"),
                 "title": result.get("title"),
                 "artist": result.get("artist"),
@@ -310,6 +354,65 @@ class EngineBridge:
                 self._send({"cmd": "set_cutoff_hz", "value": float(value)})
             except Exception:  # noqa: BLE001
                 pass
+
+    def set_speaker_route(self, route: str) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_speaker_route", "route": str(route)})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def get_audio_settings(
+        self,
+        *,
+        output_layout: str | None = None,
+        vibration_output_index: int | None = None,
+        audio_output_index: int | None = None,
+        output_name: str | None = None,
+        engine_error: str | None = None,
+    ) -> dict[str, Any]:
+        # Only talk to the worker when it's already running — and under the
+        # same lock as every other _send so a concurrent Settings poll can never
+        # interleave with Start Live / Demo on the shared stdin/stdout pipe.
+        with self._lock:
+            worker_alive = (
+                self._running
+                and self._proc is not None
+                and self._proc.poll() is None
+            )
+            if worker_alive:
+                try:
+                    result = self._send(
+                        {
+                            "cmd": "audio_settings",
+                            "output_layout": output_layout,
+                            "vibration_output_index": vibration_output_index,
+                            "audio_output_index": audio_output_index,
+                            "output_name": output_name,
+                            "engine_error": engine_error,
+                        },
+                        timeout=8.0,
+                    )
+                    if result.get("ok"):
+                        return result
+                except Exception:  # noqa: BLE001
+                    pass
+        # Idle (or worker query failed): enumerate in-process. No worker spawn.
+        try:
+            from audio.output_devices import build_audio_settings
+
+            return build_audio_settings(
+                active=self._running,
+                output_layout=output_layout,
+                vibration_index=vibration_output_index,
+                audio_index=audio_output_index,
+                output_name=output_name,
+                engine_error=engine_error,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "devices": []}
 
     def get_runtime_stats(self) -> dict[str, float]:
         with self._lock:

@@ -1,8 +1,8 @@
 """Start Live / Stop Live.
 
 Modes (auto):
-  1) Bluetooth connected in app → CABLE → Gigaport ASIO (phone via BT)
-  2) Otherwise AUX if Behringer/USB interface present → Gigaport ASIO
+  1) Bluetooth connected in app → CABLE → Gigaport output (WASAPI/WDM-KS)
+  2) Otherwise AUX if Behringer/USB interface present → Gigaport output (WASAPI/WDM-KS)
   3) Else CABLE / default capture
 
 So a plugged-in Behringer no longer steals capture while the phone is on Bluetooth.
@@ -15,6 +15,8 @@ from typing import Any
 from sounddevice import PortAudioError
 
 from audio.gigaport_output import GigaportOutput
+from audio.gigaport_routing import OutputLayout, SpeakerRoute
+from audio.output_devices import pick_output_devices
 from audio.live_input import (
     DEFAULT_VIBE_SYNC_MS,
     LiveAudioEngine,
@@ -29,7 +31,7 @@ from windows_cable import ensure_cable_default_playback
 _gigaport = GigaportOutput()
 _live_engine = LiveAudioEngine()
 
-# Demo shares this engine so Start Live / Demo never fight over ASIO.
+# Demo shares this engine so Start Live / Demo never fight over the output device.
 try:
     import demo_audio as _demo_audio
 
@@ -131,6 +133,18 @@ def _pick_capture(
     return _pick_cable_or_default()
 
 
+def _pick_output_devices(
+    *,
+    vibration_index: int | None = None,
+    audio_index: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, OutputLayout, dict[str, Any]]:
+    """WASAPI/WDM-KS Gigaports only — no ASIO."""
+    return pick_output_devices(
+        vibration_index=vibration_index,
+        audio_index=audio_index,
+    )
+
+
 def start_live_audio(
     *,
     volume: float = 0.85,
@@ -147,6 +161,9 @@ def start_live_audio(
     synthetic_vibro: bool = False,
     synthetic_type_id: str = "sine",
     prefer_bluetooth: bool = False,
+    speaker_route: SpeakerRoute = "headphones",
+    vibration_output_index: int | None = None,
+    audio_output_index: int | None = None,
 ) -> dict[str, Any]:
     """Start Live: BT session → CABLE; else AUX if present; else CABLE."""
     capture, mode = _pick_capture(
@@ -161,25 +178,25 @@ def start_live_audio(
         if not cable_route.get("ok") and not cable_route.get("skipped"):
             print(f"[live_audio] warn: {cable_route.get('error')}")
 
-    devices = _gigaport.list_output_devices(min_channels=6)
-    if not devices:
-        raise RuntimeError(
-            "No 6-channel output device is available.\n\n"
-            "On Windows:\n"
-            "1. Connect Gigaport eX via USB\n"
-            "2. Install the Gigaport ASIO driver from ESI\n"
-            "3. Close and restart this app (ASIO is enabled at startup)\n"
-            "4. Look for 'Gigaport' with ASIO and 6+ channels"
-        )
-    # Never use VB-Cable as output — always Gigaport ASIO first.
-    output_index = devices[0]["index"]
-    output_name = (
-        f"{devices[0]['name']} ({devices[0]['channels']} ch, "
-        f"{devices[0]['hostapi']}, #{output_index})"
+    vib_dev, audio_dev, layout, pick_meta = _pick_output_devices(
+        vibration_index=vibration_output_index,
+        audio_index=audio_output_index,
     )
+    output_index = vib_dev["index"]
+    audio_output_index = audio_dev["index"] if audio_dev is not None else None
+    output_name = (
+        f"{vib_dev['name']} ({vib_dev.get('probed_channels', vib_dev['channels'])} ch, "
+        f"{vib_dev['hostapi']}, #{output_index})"
+    )
+    if audio_dev is not None and audio_output_index is not None:
+        output_name += (
+            f" + Audio {audio_dev['name']} ({audio_dev['channels']} ch, "
+            f"{audio_dev['hostapi']}, #{audio_output_index})"
+        )
 
     print(
-        f"[live_audio] mode={mode} prefer_bt={prefer_bluetooth} "
+        f"[live_audio] mode={mode} layout={layout} speaker={speaker_route} "
+        f"prefer_bt={prefer_bluetooth} "
         f"capture={capture.get('name')!r} "
         f"backend={capture.get('backend')} "
         f"output={output_name!r}",
@@ -188,6 +205,12 @@ def start_live_audio(
 
     _gigaport.stop()
     _gigaport.release_output_device()
+    _live_engine.set_output_layout(layout)
+    _live_engine.set_speaker_route(speaker_route)
+    _live_engine.set_output_channel_plan(
+        vibration_channels=int(vib_dev.get("probed_channels", 8 if layout == "dual_native" else 6)),
+        audio_channels=int(audio_dev.get("probed_channels", 4)) if audio_dev else None,
+    )
     _live_engine.set_volume(volume)
     _live_engine.set_vibe_sync_ms(vibe_sync_ms)
     _live_engine.set_zone_intensities(mid=mid, legs=legs, upper=upper, head=head)
@@ -198,6 +221,7 @@ def start_live_audio(
         _live_engine.start(
             capture_device=capture,
             output_device_index=output_index,
+            audio_output_device_index=audio_output_index,
             loopback=bool(capture.get("loopback")),
             capture_channels=int(capture.get("channels", 2)),
             segmentation_id=segmentation_id,
@@ -216,6 +240,10 @@ def start_live_audio(
         "output_name": output_name,
         "vibration_overlay": vibration_overlay,
         "mode": mode,
+        "output_layout": layout,
+        "audio_output_channels": int(audio_dev.get("probed_channels", audio_dev.get("channels", 0))) if audio_dev else 0,
+        "speaker_route": speaker_route,
+        "pick_warnings": pick_meta.get("warnings") or [],
         "cable_default": cable_route.get("name"),
     }
 
@@ -242,8 +270,33 @@ def set_cutoff_hz(value: float) -> None:
     _live_engine.set_lowpass_hz(value)
 
 
+def set_speaker_route(route: SpeakerRoute) -> None:
+    _live_engine.set_speaker_route(route)
+
+
 def get_runtime_stats() -> dict[str, float]:
     return _live_engine.get_runtime_stats()
+
+
+def get_audio_settings(
+    *,
+    active: bool = False,
+    output_layout: str | None = None,
+    vibration_index: int | None = None,
+    audio_index: int | None = None,
+    output_name: str | None = None,
+    engine_error: str | None = None,
+) -> dict[str, Any]:
+    from audio.output_devices import build_audio_settings
+
+    return build_audio_settings(
+        active=active,
+        output_layout=output_layout,
+        vibration_index=vibration_index,
+        audio_index=audio_index,
+        output_name=output_name,
+        engine_error=engine_error,
+    )
 
 
 def is_active() -> bool:

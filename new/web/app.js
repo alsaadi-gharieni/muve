@@ -7,6 +7,7 @@ const el = (id) => document.getElementById(id);
 const MockApi = (() => {
   const state = {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
+    speaker_route: "headphones", output_layout: null,
     live_mode: null,
     track: { title: "Weightless", artist: "Marconi Union", album: "Ambient Transmissions", duration: 486, artwork: "assets/artwork.svg" },
     bluetooth: {
@@ -75,6 +76,25 @@ const MockApi = (() => {
     set_volume: async (v) => { state.volume = v; return snap(); },
     set_vibration: async (v) => { state.vibration = v; return snap(); },
     set_highpass_hz: async (v) => { state.highpass_hz = v; state.cutoff_hz = v; return snap(); },
+    set_speaker_route: async (route) => {
+      state.speaker_route = route === "secondary" ? "secondary" : "headphones";
+      return snap();
+    },
+    get_audio_settings: async () => ({
+      ok: true,
+      backend: "wasapi/wdm-ks",
+      asio_enabled: false,
+      active: state.playing,
+      output_layout: state.output_layout || "single",
+      selected_vibration_index: null,
+      selected_audio_index: null,
+      devices: [],
+      warnings: [],
+      auto_pick_ok: true,
+      auto_pick_error: null,
+    }),
+    refresh_audio_devices: async () => MockApi.get_audio_settings(),
+    set_output_devices: async () => snap(),
     scan_bluetooth: async () => {
       state.bluetooth.scanning = true;
       state.bluetooth.discovering = true;
@@ -172,6 +192,7 @@ let lastState = { playing: false };
 let lastDevicesSig = "";
 let lastNearbySig = "";
 let lastBtAlert = "";
+let lastAudioSettingsSig = "";
 
 // Bass cutoff UI: 0% = deepest (40 Hz), 100% = brightest (250 Hz). Default 76% ≈ 200 Hz.
 const CUTOFF_HZ_MIN = 40;
@@ -502,6 +523,30 @@ function render(s) {
   el("highpass").value = cutoffPct;
   el("hpVal").textContent = `${cutoffPct}%`;
 
+  const dualOut = s.output_layout === "dual_native";
+  const audioCh = Number(s.audio_output_channels || 0);
+  // The Headphones/Speaker toggle only makes sense when the audio device has a
+  // 2nd stereo pair (ch3-4). A plain stereo interface like the Behringer UFO202
+  // (2 ch) has no separate pair, so hide the toggle entirely for it.
+  const routeCapable = dualOut && audioCh >= 4;
+  const route = s.speaker_route === "secondary" ? "secondary" : "headphones";
+  const routeHintText = route === "secondary"
+    ? "Audio on Gigaport 2 · outputs 3–4"
+    : "Audio on Gigaport 2 · outputs 1–2";
+  // Render both the Now Playing and Demo copies of the audio-output toggle.
+  [
+    ["speakerRouteCard", "routeHeadphones", "routeSpeaker", "speakerRouteHint"],
+    ["demoSpeakerRouteCard", "demoRouteHeadphones", "demoRouteSpeaker", "demoSpeakerRouteHint"],
+  ].forEach(([cardId, hpId, spkId, hintId]) => {
+    const routeCard = el(cardId);
+    if (!routeCard) return;
+    routeCard.classList.toggle("hidden", !routeCapable);
+    el(hpId)?.classList.toggle("active", route === "headphones");
+    el(spkId)?.classList.toggle("active", route === "secondary");
+    const routeHint = el(hintId);
+    if (routeHint) routeHint.textContent = routeHintText;
+  });
+
   // Demo screen (same controls, demo.wav)
   if (el("demoTitle")) {
     const demoTrack = demoOn
@@ -640,6 +685,69 @@ function render(s) {
 
   renderDevices(s);
   renderNearby(s);
+}
+
+function statusClass(status) {
+  if (status === "active") return "ok";
+  if (status === "available") return "warn";
+  return "bad";
+}
+
+function statusLabel(status) {
+  if (status === "active") return "✓ Active";
+  if (status === "available") return "Available";
+  if (status === "blocked") return "Blocked";
+  return "Hidden";
+}
+
+async function renderAudioSettings(force = false) {
+  if (!el("audioDevicesTableBody")) return;
+  const settings = await api.get_audio_settings();
+  const sig = JSON.stringify(settings || {});
+  if (!force && sig === lastAudioSettingsSig) return;
+  lastAudioSettingsSig = sig;
+
+  const rows = Array.isArray(settings.devices) ? settings.devices : [];
+  const vibSel = el("vibrationOutputSelect");
+  const audSel = el("audioOutputSelect");
+  if (vibSel && audSel) {
+    // Vibration must be a Gigaport; audio can be any usable stereo device
+    // (a 2nd Gigaport, or a plain interface like the Behringer UFO202).
+    const gigaports = rows.filter((d) => d.is_gigaport && d.usable);
+    const audioDevs = rows.filter((d) => d.usable && (d.channels || 0) >= 2);
+    vibSel.innerHTML = `<option value="">Auto</option>${gigaports
+      .map((d) => `<option value="${d.index}">#${d.index} ${d.name} (${d.hostapi})</option>`)
+      .join("")}`;
+    audSel.innerHTML = `<option value="">Auto</option>${audioDevs
+      .map((d) => `<option value="${d.index}">#${d.index} ${d.name} (${d.hostapi})</option>`)
+      .join("")}`;
+    vibSel.value = settings.selected_vibration_index == null ? "" : String(settings.selected_vibration_index);
+    audSel.value = settings.selected_audio_index == null ? "" : String(settings.selected_audio_index);
+  }
+
+  const body = el("audioDevicesTableBody");
+  body.innerHTML = rows
+    .map((d) => `
+      <tr>
+        <td><span class="status-pill ${statusClass(d.status)}">${statusLabel(d.status)}</span></td>
+        <td>${d.role || "—"}</td>
+        <td>${d.name}</td>
+        <td>${d.hostapi}</td>
+        <td>${d.channels || 0}</td>
+      </tr>
+    `)
+    .join("");
+
+  const title = el("audioStatusTitle");
+  const sub = el("audioStatusSub");
+  if (!settings.auto_pick_ok) {
+    title.textContent = "Output auto-pick failed";
+    sub.textContent = settings.auto_pick_error || "Check driver and USB connections.";
+  } else {
+    title.textContent = settings.active ? "Audio engine running ✓" : "Audio engine idle";
+    const warn = (settings.warnings || []).join(" · ");
+    sub.textContent = warn || `Backend: ${settings.backend || "wasapi/wdm-ks"} · layout: ${settings.output_layout || "single"}`;
+  }
 }
 
 function devicesSig(s) {
@@ -791,6 +899,9 @@ function wire() {
       b.classList.add("active");
       document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
       el("screen-" + b.dataset.screen).classList.add("active");
+      if (b.dataset.screen === "settings") {
+        renderAudioSettings(true);
+      }
     })
   );
 
@@ -851,6 +962,15 @@ function wire() {
     const pct = Number(el("highpass").value);
     el("hpVal").textContent = `${pct}%`;
     render(await api.set_highpass_hz(pctToCutoffHz(pct)));
+  });
+
+  document.querySelectorAll(".route-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const route = btn.getAttribute("data-route") || "headphones";
+      if (api.set_speaker_route) {
+        render(await api.set_speaker_route(route));
+      }
+    });
   });
 
   // Demo tab — same controls, plays demo.wav through Live path
@@ -932,6 +1052,25 @@ function wire() {
     lastNearbySig = "";
     render(await api.forget_all_devices());
   });
+
+  el("refreshAudioBtn")?.addEventListener("click", async () => {
+    if (api.refresh_audio_devices) {
+      await api.refresh_audio_devices();
+    }
+    await renderAudioSettings(true);
+  });
+
+  el("saveAudioSelectionBtn")?.addEventListener("click", async () => {
+    const vibRaw = el("vibrationOutputSelect")?.value;
+    const audRaw = el("audioOutputSelect")?.value;
+    const vib = vibRaw === "" ? null : Number(vibRaw);
+    const aud = audRaw === "" ? null : Number(audRaw);
+    if (api.set_output_devices) {
+      await api.set_output_devices(vib, aud);
+    }
+    await renderAudioSettings(true);
+    render(await api.get_state());
+  });
 }
 
 // -------------------------------------------------------------------- boot --
@@ -940,8 +1079,14 @@ async function boot() {
   wire();
   initViz();
   render(await api.get_state());
+  await renderAudioSettings(true);
   setInterval(async () => {
     if (!seeking && !demoSeeking) render(await api.get_state());
+    // Only refresh device settings while the Settings screen is open, so we
+    // don't hit the audio worker every tick during playback.
+    if (el("screen-settings")?.classList.contains("active")) {
+      await renderAudioSettings();
+    }
   }, 400);
 }
 

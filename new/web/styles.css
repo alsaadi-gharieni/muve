@@ -456,6 +456,30 @@ html, body {
 .slider-val { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
 .slider-hint { margin-top: 6px; font-size: 11px; color: var(--text-faint); line-height: 1.35; }
 
+.speaker-route-btns {
+  display: flex;
+  gap: 8px;
+}
+.route-btn {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.route-btn:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.route-btn.active {
+  background: rgba(10, 132, 255, 0.18);
+  border-color: rgba(10, 132, 255, 0.45);
+  color: #fff;
+}
+.speaker-route-card.hidden { display: none; }
+
 /* ------------------------------------------------------- Bluetooth ---- */
 #screen-bluetooth {
   padding: 40px 56px;
@@ -666,4 +690,78 @@ html, body {
   .tbtn.play { width: 54px; height: 54px; }
   .slider-card { padding: 8px 12px; }
   .howto-card { padding: 8px 10px; }
+}
+
+/* Settings page */
+#screen-settings {
+  padding: 40px 56px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+  max-width: 960px;
+}
+
+.settings-grid select {
+  width: 100%;
+  background: #12131a;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e7eaf3;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.table-wrap {
+  max-width: 960px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0e0f14;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.settings-table th,
+.settings-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.status-pill.ok {
+  color: #32d74b;
+  border-color: rgba(50, 215, 75, 0.4);
+}
+
+.status-pill.warn {
+  color: #ffd60a;
+  border-color: rgba(255, 214, 10, 0.4);
+}
+
+.status-pill.bad {
+  color: #ff5f57;
+  border-color: rgba(255, 95, 87, 0.45);
 }

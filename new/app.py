@@ -19,10 +19,6 @@ if "--engine-worker" in sys.argv:
 
     raise SystemExit(engine_worker.main())
 
-# Gigaport eX exposes 6 channels via ASIO — must be set before sounddevice loads.
-if sys.platform == "win32":
-    os.environ.setdefault("SD_ENABLE_ASIO", "1")
-
 import webview
 
 from bt_audio import BluetoothAudioService
@@ -76,6 +72,11 @@ class Api:
             "capture_name": None,
             "output_name": None,
             "live_mode": None,  # 'aux' | 'cable' | 'overlay' | 'demo' while Live is on
+            "speaker_route": "headphones",  # 'headphones' | 'secondary' (dual Gigaport)
+            "output_layout": None,  # 'single' | 'dual_native'
+            "audio_output_channels": 0,  # channels on the audio (sound) device
+            "vibration_output_index": None,
+            "audio_output_index": None,
             "play_busy": False,
             "media": {
                 "ok": False,
@@ -125,7 +126,6 @@ class Api:
     # ------------------------------------------------------------------ state --
     def get_state(self) -> dict[str, Any]:
         self._refresh_bluetooth_link()
-        self._schedule_paired_refresh()
         self._refresh_media()
         with self._lock:
             if self.state["playing"] and self._engine.available:
@@ -356,11 +356,16 @@ class Api:
                 vibration=self.state["vibration"],
                 cutoff_hz=self.state["cutoff_hz"],
                 prefer_bluetooth=bool(self.state["bluetooth"].get("connected_id")),
+                speaker_route=self.state.get("speaker_route", "headphones"),
+                vibration_output_index=self.state.get("vibration_output_index"),
+                audio_output_index=self.state.get("audio_output_index"),
             )
             with self._lock:
                 self.state["playing"] = bool(result.get("ok"))
                 self.state["capture_name"] = result.get("capture")
                 self.state["output_name"] = result.get("output_name")
+                self.state["output_layout"] = result.get("output_layout")
+                self.state["audio_output_channels"] = int(result.get("audio_output_channels") or 0)
                 self.state["live_mode"] = result.get("mode") if result.get("ok") else None
                 self.state["engine_error"] = None if result.get("ok") else result.get("error")
                 self.state["demo"]["error"] = None
@@ -446,12 +451,16 @@ class Api:
                 volume=self.state["volume"],
                 vibration=self.state["vibration"],
                 cutoff_hz=self.state["cutoff_hz"],
+                vibration_output_index=self.state.get("vibration_output_index"),
+                audio_output_index=self.state.get("audio_output_index"),
             )
             with self._lock:
                 ok = bool(result.get("ok"))
                 self.state["playing"] = ok
                 self.state["capture_name"] = result.get("capture")
                 self.state["output_name"] = result.get("output_name")
+                self.state["output_layout"] = result.get("output_layout")
+                self.state["audio_output_channels"] = int(result.get("audio_output_channels") or 0)
                 self.state["live_mode"] = "demo" if ok else None
                 self.state["engine_error"] = None if ok else result.get("error")
                 self.state["demo"]["error"] = None if ok else result.get("error")
@@ -568,6 +577,54 @@ class Api:
         self._engine.set_cutoff_hz(hz)
         with self._lock:
             return self._snapshot()
+
+    def set_speaker_route(self, route: str) -> dict[str, Any]:
+        """Switch audio output between Gigaport 2 ch 1-2 (headphones) and ch 3-4 (speaker)."""
+        route = str(route).strip().lower()
+        if route not in ("headphones", "secondary"):
+            route = "headphones"
+        with self._lock:
+            self.state["speaker_route"] = route
+        self._engine.set_speaker_route(route)
+        with self._lock:
+            return self._snapshot()
+
+    def set_output_devices(
+        self,
+        vibration_output_index: int | None = None,
+        audio_output_index: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self.state["vibration_output_index"] = (
+                int(vibration_output_index) if vibration_output_index is not None else None
+            )
+            self.state["audio_output_index"] = (
+                int(audio_output_index) if audio_output_index is not None else None
+            )
+            return self._snapshot()
+
+    def get_audio_settings(self) -> dict[str, Any]:
+        with self._lock:
+            playing = bool(self.state.get("playing"))
+            output_layout = self.state.get("output_layout")
+            vibration_output_index = self.state.get("vibration_output_index")
+            audio_output_index = self.state.get("audio_output_index")
+            output_name = self.state.get("output_name")
+            engine_error = self.state.get("engine_error")
+        settings = self._engine.get_audio_settings(
+            output_layout=output_layout,
+            vibration_output_index=vibration_output_index,
+            audio_output_index=audio_output_index,
+            output_name=output_name,
+            engine_error=engine_error,
+        )
+        settings["active"] = playing
+        settings["selected_vibration_index"] = vibration_output_index
+        settings["selected_audio_index"] = audio_output_index
+        return settings
+
+    def refresh_audio_devices(self) -> dict[str, Any]:
+        return self.get_audio_settings()
 
     # --------------------------------------------------------------- bluetooth --
     def list_devices(self) -> list[dict[str, Any]]:

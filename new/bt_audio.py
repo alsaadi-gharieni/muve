@@ -863,7 +863,6 @@ class BluetoothAudioService:
     async def _enumerate_apc_watcher(self, timeout: float = 4.0) -> list[Any]:
         """DeviceWatcher(AudioPlaybackConnection.GetDeviceSelector()) — same as APC."""
         selector = self._apc_selector()
-        print(f"[bt_audio] APC selector: {selector[:120]}…")
 
         found: dict[str, Any] = {}
         tokens: list[tuple[str, Any]] = []
@@ -873,7 +872,6 @@ class BluetoothAudioService:
         def on_added(_sender: Any, info: Any) -> None:
             try:
                 found[str(info.id)] = info
-                print(f"[bt_audio] apc + {getattr(info, 'name', '')!r}")
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
 
@@ -884,7 +882,6 @@ class BluetoothAudioService:
                 pass
 
         def on_enum_completed(_sender: Any, _args: Any) -> None:
-            print(f"[bt_audio] apc EnumerationCompleted ({len(found)} device(s))")
             try:
                 done.set()
             except Exception:  # noqa: BLE001
@@ -901,7 +898,6 @@ class BluetoothAudioService:
                 continue
             try:
                 watcher = fn(selector)
-                print(f"[bt_audio] OK DeviceWatcher via {name} (APC GetDeviceSelector)")
                 break
             except Exception as exc:  # noqa: BLE001
                 print(f"[bt_audio] {name} failed: {type(exc).__name__}: {exc}")
@@ -928,11 +924,10 @@ class BluetoothAudioService:
 
         try:
             watcher.start()
-            print(f"[bt_audio] apc: watching up to {timeout:.0f}s…")
             try:
                 await asyncio.wait_for(done.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                print(f"[bt_audio] apc: timeout after {timeout:.0f}s with {len(found)} device(s)")
+                pass
             # Brief linger for late Added events.
             await asyncio.sleep(0.4)
             try:
@@ -948,7 +943,6 @@ class BluetoothAudioService:
                     pass
             self._watcher_handlers = []
 
-        print(f"[bt_audio] apc collected {len(found)} device(s)")
         return list(found.values())
 
     async def _list_devices(self) -> list[dict[str, Any]]:
@@ -970,7 +964,6 @@ class BluetoothAudioService:
         devices.sort(key=lambda d: str(d.get("name", "")).lower())
         self._device_meta = {d["id"]: d for d in devices}
         self._emit_progress(devices)
-        print(f"[bt_audio] scan total={len(devices)} (APC GetDeviceSelector)")
         if not devices:
             self.last_error = (
                 "No paired audio phones found. "

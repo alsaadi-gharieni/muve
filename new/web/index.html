@@ -28,6 +28,10 @@
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Bluetooth</span>
         </button>
+        <button class="nav-item" data-screen="settings">
+          <svg viewBox="0 0 24 24"><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V22a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          <span>Settings</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">
@@ -127,6 +131,18 @@
                 <input type="range" id="highpass" min="0" max="100" value="76" class="range" />
                 <p class="slider-hint">Lower % = deeper bass. Higher % = brighter / less deep rumble.</p>
               </div>
+
+              <div class="slider-card speaker-route-card" id="speakerRouteCard">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M4 10v4h3l4 4V6L7 10H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 010 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Audio output</span>
+                </div>
+                <div class="speaker-route-btns">
+                  <button type="button" class="route-btn active" id="routeHeadphones" data-route="headphones">Headphones</button>
+                  <button type="button" class="route-btn" id="routeSpeaker" data-route="secondary">Speaker</button>
+                </div>
+                <p class="slider-hint" id="speakerRouteHint">Dual Gigaport: ch 1–2 vs ch 3–4 on audio unit.</p>
+              </div>
             </div>
           </div>
         </div>
@@ -211,6 +227,18 @@
                 <input type="range" id="demoHighpass" min="0" max="100" value="76" class="range" />
                 <p class="slider-hint">Lower % = deeper bass. Higher % = brighter / less deep rumble.</p>
               </div>
+
+              <div class="slider-card speaker-route-card" id="demoSpeakerRouteCard">
+                <div class="slider-head">
+                  <svg viewBox="0 0 24 24"><path d="M4 10v4h3l4 4V6L7 10H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 010 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span>Audio output</span>
+                </div>
+                <div class="speaker-route-btns">
+                  <button type="button" class="route-btn active" id="demoRouteHeadphones" data-route="headphones">Headphones</button>
+                  <button type="button" class="route-btn" id="demoRouteSpeaker" data-route="secondary">Speaker</button>
+                </div>
+                <p class="slider-hint" id="demoSpeakerRouteHint">Dual Gigaport: ch 1–2 vs ch 3–4 on audio unit.</p>
+              </div>
             </div>
           </div>
         </div>
@@ -253,6 +281,50 @@
 
         <h2 class="list-title">Nearby — tap Pair</h2>
         <ul class="device-list" id="nearbyList"></ul>
+      </section>
+
+      <section class="screen" id="screen-settings">
+        <header class="screen-head">
+          <div>
+            <h1>Audio Settings</h1>
+            <p class="subtle">WASAPI/WDM-KS outputs only. ASIO is disabled.</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn-ghost" id="refreshAudioBtn">Refresh</button>
+          </div>
+        </header>
+        <div class="status-card" id="audioStatusCard">
+          <div class="status-icon"><span id="audioStatusIcon">✓</span></div>
+          <div class="status-text">
+            <strong id="audioStatusTitle">Checking devices…</strong>
+            <span class="subtle" id="audioStatusSub"></span>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <div class="slider-card">
+            <div class="slider-head"><span>Vibration output</span></div>
+            <select id="vibrationOutputSelect"></select>
+          </div>
+          <div class="slider-card">
+            <div class="slider-head"><span>Audio output (optional)</span></div>
+            <select id="audioOutputSelect"></select>
+          </div>
+          <button class="btn-primary" id="saveAudioSelectionBtn">Save output selection</button>
+        </div>
+        <div class="table-wrap">
+          <table class="settings-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Role</th>
+                <th>Name</th>
+                <th>Host API</th>
+                <th>Channels</th>
+              </tr>
+            </thead>
+            <tbody id="audioDevicesTableBody"></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>

@@ -31,6 +31,76 @@ from windows_cable import ensure_cable_default_playback
 _gigaport = GigaportOutput()
 _live_engine = LiveAudioEngine()
 
+_vibration_base = 0.27
+_vibration_muted = False
+_zone_enabled: dict[str, bool] = {
+    "head": True,
+    "upper": True,
+    "mid": True,
+    "legs": True,
+}
+
+
+def _intensities_for_base(base: float) -> dict[str, float]:
+    if _vibration_muted:
+        return {"head": 0.0, "upper": 0.0, "mid": 0.0, "legs": 0.0}
+    b = max(0.0, min(1.0, float(base)))
+    return {
+        "head": b if _zone_enabled["head"] else 0.0,
+        "upper": b if _zone_enabled["upper"] else 0.0,
+        "mid": b if _zone_enabled["mid"] else 0.0,
+        "legs": b if _zone_enabled["legs"] else 0.0,
+    }
+
+
+def sync_zone_enabled(enabled: dict[str, bool] | None) -> None:
+    if not enabled:
+        return
+    for key in _zone_enabled:
+        if key in enabled:
+            _zone_enabled[key] = bool(enabled[key])
+
+
+def prepare_zone_intensities(
+    base: float,
+    zone_enabled: dict[str, bool] | None = None,
+    *,
+    vibration_muted: bool | None = None,
+) -> dict[str, float]:
+    """Sync UI zone flags and return per-zone gains for engine start."""
+    global _vibration_base, _vibration_muted
+    sync_zone_enabled(zone_enabled)
+    if vibration_muted is not None:
+        _vibration_muted = bool(vibration_muted)
+    _vibration_base = max(0.0, min(1.0, float(base)))
+    return _intensities_for_base(_vibration_base)
+
+
+def apply_zone_intensities(base: float) -> None:
+    global _vibration_base
+    _vibration_base = max(0.0, min(1.0, float(base)))
+    zi = _intensities_for_base(_vibration_base)
+    _live_engine.set_zone_intensities(
+        mid=zi["mid"],
+        legs=zi["legs"],
+        upper=zi["upper"],
+        head=zi["head"],
+    )
+
+
+def get_zone_enabled() -> dict[str, bool]:
+    return dict(_zone_enabled)
+
+
+def set_vibration_muted(muted: bool) -> None:
+    global _vibration_muted
+    _vibration_muted = bool(muted)
+    apply_zone_intensities(_vibration_base)
+
+
+def get_vibration_muted() -> bool:
+    return bool(_vibration_muted)
+
 # Demo shares this engine so Start Live / Demo never fight over the output device.
 try:
     import demo_audio as _demo_audio
@@ -41,7 +111,7 @@ except Exception:  # noqa: BLE001
 
 
 def _log_input_devices() -> None:
-    """Print PortAudio inputs so we can see Behringer naming on the tablet."""
+    """Print PortAudio inputs (once at Live start, for tablet debugging)."""
     try:
         import sounddevice as sd
 
@@ -89,6 +159,7 @@ def _pick_capture(
     *,
     vibration_overlay: bool,
     prefer_bluetooth: bool = False,
+    log: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Return (capture_device, mode) where mode is 'aux' | 'cable' | 'overlay'.
 
@@ -96,7 +167,8 @@ def _pick_capture(
       - Bluetooth connected → CABLE first (phone is streaming over BT)
       - No Bluetooth → AUX first if interface present, else CABLE
     """
-    _log_input_devices()
+    if log:
+        _log_input_devices()
 
     if vibration_overlay:
         gigaport_lb = find_gigaport_loopback_device()
@@ -106,31 +178,60 @@ def _pick_capture(
     aux = pick_aux_capture_device()
 
     if prefer_bluetooth:
-        print(
-            "[live_audio] Bluetooth connected — preferring CABLE over AUX",
-            flush=True,
-        )
         try:
             return _pick_cable_or_default()
         except RuntimeError:
             if aux is not None:
-                print(
-                    "[live_audio] CABLE unavailable — falling back to AUX",
-                    flush=True,
-                )
                 return aux, "aux"
             raise
 
-    # Phone on AUX (no BT session): use Behringer when present.
     if aux is not None:
-        print("[live_audio] no Bluetooth session — using AUX", flush=True)
         return aux, "aux"
 
-    print(
-        "[live_audio] no AUX/Behringer/USB input matched — using CABLE (Bluetooth)",
-        flush=True,
-    )
     return _pick_cable_or_default()
+
+
+def probe_live_input(
+    *,
+    prefer_bluetooth: bool = False,
+    vibration_overlay: bool = False,
+) -> dict[str, Any]:
+    """Check whether Now Playing can start (AUX line-in or Bluetooth/CABLE only)."""
+    not_ready_msg = "Connect AUX or Bluetooth to start."
+    try:
+        capture, mode = _pick_capture(
+            vibration_overlay=vibration_overlay,
+            prefer_bluetooth=prefer_bluetooth,
+            log=False,
+        )
+    except RuntimeError as exc:
+        return {
+            "ready": False,
+            "mode": None,
+            "capture_name": None,
+            "message": str(exc) or not_ready_msg,
+        }
+
+    if mode not in ("aux", "cable"):
+        return {
+            "ready": False,
+            "mode": None,
+            "capture_name": str(capture.get("name") or ""),
+            "message": not_ready_msg,
+        }
+
+    name = str(capture.get("name") or "")
+    if mode == "aux":
+        message = "AUX ready"
+    else:
+        message = "Bluetooth ready"
+
+    return {
+        "ready": True,
+        "mode": mode,
+        "capture_name": name,
+        "message": message,
+    }
 
 
 def _pick_output_devices(
@@ -169,6 +270,7 @@ def start_live_audio(
     capture, mode = _pick_capture(
         vibration_overlay=vibration_overlay,
         prefer_bluetooth=prefer_bluetooth,
+        log=True,
     )
 
     cable_route: dict[str, Any] = {"ok": True, "skipped": True}
@@ -208,7 +310,12 @@ def start_live_audio(
     _live_engine.set_output_layout(layout)
     _live_engine.set_speaker_route(speaker_route)
     _live_engine.set_output_channel_plan(
-        vibration_channels=int(vib_dev.get("probed_channels", 8 if layout == "dual_native" else 6)),
+        vibration_channels=int(
+            vib_dev.get(
+                "probed_channels",
+                8 if layout in ("dual_native", "vibration_only") else 6,
+            )
+        ),
         audio_channels=int(audio_dev.get("probed_channels", 4)) if audio_dev else None,
     )
     _live_engine.set_volume(volume)
@@ -257,8 +364,20 @@ def set_volume(value: float) -> None:
     _live_engine.set_volume(value)
 
 
+def set_audio_muted(muted: bool) -> None:
+    _live_engine.set_audio_muted(muted)
+
+
 def set_vibration(value: float) -> None:
-    _live_engine.set_zone_intensities(mid=value, legs=value, upper=value, head=value)
+    apply_zone_intensities(value)
+
+
+def set_zone_enabled(zone: str, enabled: bool) -> None:
+    key = str(zone).strip().lower()
+    if key not in _zone_enabled:
+        return
+    _zone_enabled[key] = bool(enabled)
+    apply_zone_intensities(_vibration_base)
 
 
 def set_highpass_hz(value: float) -> None:

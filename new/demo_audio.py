@@ -27,7 +27,7 @@ _demo_meta: dict[str, Any] = {
     "duration": 0.0,
     "title": "Demo",
     "artist": "MUVI test track",
-    "album": "assets/demo.wav",
+    "album": "",
 }
 
 
@@ -97,7 +97,7 @@ def demo_track_info(path: str | None = None) -> dict[str, Any]:
         "duration": duration,
         "title": "Demo",
         "artist": "MUVI test track",
-        "album": os.path.relpath(resolved, _APP_DIR).replace("\\", "/"),
+        "album": "",
         "artwork": "assets/artwork.svg",
     }
     _demo_meta.update(info)
@@ -132,7 +132,7 @@ def start_demo_audio(
             "duration": duration,
             "title": "Demo",
             "artist": "MUVI test track",
-            "album": os.path.relpath(resolved, _APP_DIR).replace("\\", "/"),
+            "album": "",
         }
     )
 
@@ -158,7 +158,12 @@ def start_demo_audio(
     _gigaport.release_output_device()
     _engine.set_output_layout(layout)
     _engine.set_output_channel_plan(
-        vibration_channels=int(output_dev.get("probed_channels", 8 if layout == "dual_native" else 6)),
+        vibration_channels=int(
+            output_dev.get(
+                "probed_channels",
+                8 if layout in ("dual_native", "vibration_only") else 6,
+            )
+        ),
         audio_channels=int(audio_dev.get("probed_channels", 4)) if audio_dev else None,
     )
     _engine.set_volume(volume)

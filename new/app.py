@@ -22,7 +22,10 @@ if "--engine-worker" in sys.argv:
 import webview
 
 from bt_audio import BluetoothAudioService
+from battery_manager import BatteryManager
 from engine_bridge import EngineBridge
+from hardware_monitor import probe_hardware_status
+from live_audio import probe_live_input
 from media_session import MediaSessionService
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,10 +52,15 @@ class Api:
                 "head": 0.0, "upper": 0.0, "mid": 0.0, "legs": 0.0,
                 "left": 0.0, "right": 0.0,
             },
+            "zone_enabled": {
+                "head": True, "upper": True, "mid": True, "legs": True,
+            },
+            "audio_muted": False,
+            "vibration_muted": False,
             "track": {
                 "title": "Live Bluetooth",
                 "artist": "Phone audio",
-                "album": "AUX: plug in → Play · Bluetooth: Connect → play phone → Play",
+                "album": "",
                 "duration": 0.0,
                 "artwork": "assets/artwork.svg",
             },
@@ -72,6 +80,12 @@ class Api:
             "capture_name": None,
             "output_name": None,
             "live_mode": None,  # 'aux' | 'cable' | 'overlay' | 'demo' while Live is on
+            "live_input": {
+                "ready": False,
+                "mode": None,
+                "capture_name": None,
+                "message": "Connect AUX or Bluetooth to start.",
+            },
             "speaker_route": "headphones",  # 'headphones' | 'secondary' (dual Gigaport)
             "output_layout": None,  # 'single' | 'dual_native'
             "audio_output_channels": 0,  # channels on the audio (sound) device
@@ -102,13 +116,26 @@ class Api:
         self._demo_track = {
             "title": "Demo",
             "artist": "MUVI test track",
-            "album": "assets/demo.wav",
+            "album": "",
             "duration": 0.0,
             "artwork": "assets/artwork.svg",
         }
         self._live_started_at: float | None = None
         self._last_paired_refresh = 0.0
         self._paired_refresh_busy = False
+        self._battery = BatteryManager()
+        self._hardware_last_poll = 0.0
+        self._hardware_cache: dict[str, Any] = {
+            "gigaport_connected": False,
+            "gigaport_count": 0,
+            "gigaport_name": None,
+            "codec_connected": False,
+            "codec_name": None,
+            "headphones_kind": None,
+            "battery_percent": None,
+            "charging": False,
+            "battery_available": False,
+        }
 
         # Private so pywebview does not recurse into the engine object graph.
         self._engine = EngineBridge()
@@ -122,6 +149,7 @@ class Api:
         # Show already-paired phones without requiring Scan.
         if self._bt.available:
             self._schedule_paired_refresh(force=True)
+        self._refresh_hardware_status(force=True)
 
     # ------------------------------------------------------------------ state --
     def get_state(self) -> dict[str, Any]:
@@ -146,7 +174,51 @@ class Api:
                     "head": 0.0, "upper": 0.0, "mid": 0.0, "legs": 0.0,
                     "left": 0.0, "right": 0.0,
                 }
+            self._refresh_live_input_probe()
+            self._refresh_hardware_status()
             return self._snapshot()
+
+    def _refresh_hardware_status(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._hardware_last_poll) < 2.0:
+            return
+        self._hardware_last_poll = now
+        playing = bool(self.state.get("playing"))
+        try:
+            hw = probe_hardware_status(playing=playing)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] hardware probe failed: {exc}")
+            hw = {}
+        percent = self._battery.get_battery_percent()
+        self._hardware_cache = {
+            "gigaport_connected": bool(hw.get("gigaport_connected")),
+            "gigaport_count": int(hw.get("gigaport_count") or 0),
+            "gigaport_name": hw.get("gigaport_name"),
+            "codec_connected": bool(hw.get("codec_connected")),
+            "codec_name": hw.get("codec_name"),
+            "headphones_kind": hw.get("headphones_kind"),
+            "battery_percent": percent,
+            "charging": bool(self._battery.is_charging()) if percent is not None else False,
+            "battery_available": self._battery.is_available(),
+        }
+
+    def _refresh_live_input_probe(self) -> None:
+        """Update whether Now Playing can start (AUX or Bluetooth/CABLE only)."""
+        playing = bool(self.state.get("playing"))
+        live_mode = self.state.get("live_mode")
+        if playing and live_mode and live_mode != "demo":
+            return
+        prefer_bt = bool(self.state["bluetooth"].get("connected_id"))
+        try:
+            probe = probe_live_input(prefer_bluetooth=prefer_bt)
+        except Exception as exc:  # noqa: BLE001
+            probe = {
+                "ready": False,
+                "mode": None,
+                "capture_name": None,
+                "message": str(exc),
+            }
+        self.state["live_input"] = probe
 
     def _schedule_paired_refresh(self, *, force: bool = False) -> None:
         """Keep the paired-phones list current without a Scan button."""
@@ -248,7 +320,7 @@ class Api:
                 self.state["track"] = {
                     "title": self._demo_track.get("title") or "Demo",
                     "artist": self._demo_track.get("artist") or "MUVI test track",
-                    "album": self._demo_track.get("album") or "assets/demo.wav",
+                    "album": self._demo_track.get("album") or "",
                     "duration": duration,
                     "artwork": self._demo_track.get("artwork") or "assets/artwork.svg",
                 }
@@ -296,19 +368,17 @@ class Api:
                 if mode == "aux":
                     self.state["track"]["title"] = "AUX Live"
                     self.state["track"]["artist"] = self.state.get("capture_name") or "Line-in"
-                    self.state["track"]["album"] = "Song info not available over AUX"
+                    self.state["track"]["album"] = ""
                 else:
                     self.state["track"]["title"] = "Bluetooth Live"
                     self.state["track"]["artist"] = device_name or "Phone"
-                    self.state["track"]["album"] = (
-                        "Song title not available from phone over Bluetooth"
-                    )
+                    self.state["track"]["album"] = ""
             elif connected_id:
                 self.state["position"] = 0.0
                 self.state["track"]["duration"] = 0.0
                 self.state["track"]["title"] = "Ready"
                 self.state["track"]["artist"] = device_name or "Phone connected"
-                self.state["track"]["album"] = "Play music on the phone, then press Play"
+                self.state["track"]["album"] = ""
             else:
                 self.state["track"]["title"] = self._default_track["title"]
                 self.state["track"]["artist"] = self._default_track["artist"]
@@ -322,9 +392,14 @@ class Api:
         snap["bluetooth"] = dict(self.state["bluetooth"])
         snap["media"] = dict(self.state.get("media") or {})
         snap["zone_rms"] = dict(self.state.get("zone_rms") or {})
+        snap["zone_enabled"] = dict(self.state.get("zone_enabled") or {})
+        snap["audio_muted"] = bool(self.state.get("audio_muted"))
+        snap["vibration_muted"] = bool(self.state.get("vibration_muted"))
+        snap["live_input"] = dict(self.state.get("live_input") or {})
         snap["demo"] = dict(self.state.get("demo") or {})
         snap["devices"] = [dict(d) for d in self._devices]
         snap["nearby_devices"] = [dict(d) for d in self._nearby]
+        snap["hardware"] = dict(self._hardware_cache)
         return snap
 
     # -------------------------------------------------------- Start / Stop Live --
@@ -351,6 +426,17 @@ class Api:
                     self.state["play_busy"] = False
                     return self._snapshot()
 
+            with self._lock:
+                prefer_bt = bool(self.state["bluetooth"].get("connected_id"))
+                self._refresh_live_input_probe()
+                live_input = dict(self.state.get("live_input") or {})
+            if not live_input.get("ready"):
+                with self._lock:
+                    self.state["engine_error"] = live_input.get("message")
+                    self.state["playing"] = False
+                    self.state["play_busy"] = False
+                    return self._snapshot()
+
             result = self._engine.start_live(
                 volume=self.state["volume"],
                 vibration=self.state["vibration"],
@@ -359,6 +445,9 @@ class Api:
                 speaker_route=self.state.get("speaker_route", "headphones"),
                 vibration_output_index=self.state.get("vibration_output_index"),
                 audio_output_index=self.state.get("audio_output_index"),
+                zone_enabled=dict(self.state.get("zone_enabled") or {}),
+                audio_muted=bool(self.state.get("audio_muted")),
+                vibration_muted=bool(self.state.get("vibration_muted")),
             )
             with self._lock:
                 self.state["playing"] = bool(result.get("ok"))
@@ -453,6 +542,9 @@ class Api:
                 cutoff_hz=self.state["cutoff_hz"],
                 vibration_output_index=self.state.get("vibration_output_index"),
                 audio_output_index=self.state.get("audio_output_index"),
+                zone_enabled=dict(self.state.get("zone_enabled") or {}),
+                audio_muted=bool(self.state.get("audio_muted")),
+                vibration_muted=bool(self.state.get("vibration_muted")),
             )
             with self._lock:
                 ok = bool(result.get("ok"))
@@ -552,16 +644,54 @@ class Api:
 
     # ---------------------------------------------------------------- controls --
     def set_volume(self, value: float) -> dict[str, Any]:
+        vol = max(0.0, min(1.0, float(value)))
+        mute = vol <= 0.0
         with self._lock:
-            self.state["volume"] = max(0.0, min(1.0, float(value)))
-        self._engine.set_volume(self.state["volume"])
+            self.state["volume"] = vol
+            self.state["audio_muted"] = mute
+        self._engine.set_volume(vol)
+        self._engine.set_audio_muted(mute)
+        with self._lock:
+            return self._snapshot()
+
+    def set_audio_muted(self, muted: bool) -> dict[str, Any]:
+        with self._lock:
+            self.state["audio_muted"] = bool(muted)
+        self._engine.set_audio_muted(bool(muted))
         with self._lock:
             return self._snapshot()
 
     def set_vibration(self, value: float) -> dict[str, Any]:
+        vib = max(0.0, min(1.0, float(value)))
+        mute = vib <= 0.0
         with self._lock:
-            self.state["vibration"] = max(0.0, min(1.0, float(value)))
-        self._engine.set_vibration(self.state["vibration"])
+            self.state["vibration"] = vib
+            self.state["vibration_muted"] = mute
+        self._engine.set_vibration(vib)
+        self._engine.set_vibration_muted(mute)
+        with self._lock:
+            return self._snapshot()
+
+    def set_vibration_muted(self, muted: bool) -> dict[str, Any]:
+        with self._lock:
+            self.state["vibration_muted"] = bool(muted)
+        self._engine.set_vibration_muted(bool(muted))
+        with self._lock:
+            return self._snapshot()
+
+    def set_zone_enabled(self, zone: str, enabled: bool) -> dict[str, Any]:
+        key = str(zone).strip().lower()
+        if key not in ("head", "upper", "mid", "legs"):
+            with self._lock:
+                return self._snapshot()
+        with self._lock:
+            self.state.setdefault("zone_enabled", {})[key] = bool(enabled)
+            # Turning any zone back on clears master vibration mute.
+            if enabled:
+                self.state["vibration_muted"] = False
+        self._engine.set_zone_enabled(key, bool(enabled))
+        if enabled:
+            self._engine.set_vibration_muted(False)
         with self._lock:
             return self._snapshot()
 
@@ -624,6 +754,12 @@ class Api:
         return settings
 
     def refresh_audio_devices(self) -> dict[str, Any]:
+        try:
+            probe_hardware_status(playing=False, force_refresh=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[app] hardware refresh failed: {exc}")
+        self._hardware_last_poll = 0.0
+        self._refresh_hardware_status()
         return self.get_audio_settings()
 
     # --------------------------------------------------------------- bluetooth --

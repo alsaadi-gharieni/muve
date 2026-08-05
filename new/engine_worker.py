@@ -29,10 +29,14 @@ from live_audio import (  # noqa: E402
     get_audio_settings,
     get_runtime_stats,
     is_active,
+    prepare_zone_intensities,
     set_cutoff_hz,
     set_speaker_route,
+    set_audio_muted,
     set_vibration,
+    set_vibration_muted,
     set_volume,
+    set_zone_enabled,
     start_live_audio,
     stop_live_audio,
 )
@@ -60,12 +64,17 @@ def main() -> int:
         try:
             if cmd == "start":
                 v = float(msg.get("vibration", 0.27))
+                zi = prepare_zone_intensities(
+                    v,
+                    msg.get("zone_enabled"),
+                    vibration_muted=bool(msg.get("vibration_muted", False)),
+                )
                 result = start_live_audio(
                     volume=float(msg.get("volume", 0.70)),
-                    mid=v,
-                    legs=v,
-                    upper=v,
-                    head=v,
+                    mid=zi["mid"],
+                    legs=zi["legs"],
+                    upper=zi["upper"],
+                    head=zi["head"],
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     vibration_overlay=False,
                     prefer_bluetooth=bool(msg.get("prefer_bluetooth", False)),
@@ -73,6 +82,7 @@ def main() -> int:
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
                 )
+                set_audio_muted(bool(msg.get("audio_muted", False)))
                 print(
                     f"[engine_worker] START LIVE ok — capture={result.get('capture')!r} "
                     f"output={result.get('output_name')!r}"
@@ -83,18 +93,24 @@ def main() -> int:
                 # Stop any Live capture first — shared LiveAudioEngine / ASIO.
                 stop_live_audio()
                 v = float(msg.get("vibration", 0.27))
+                zi = prepare_zone_intensities(
+                    v,
+                    msg.get("zone_enabled"),
+                    vibration_muted=bool(msg.get("vibration_muted", False)),
+                )
                 result = start_demo_audio(
                     volume=float(msg.get("volume", 0.70)),
-                    mid=v,
-                    legs=v,
-                    upper=v,
-                    head=v,
+                    mid=zi["mid"],
+                    legs=zi["legs"],
+                    upper=zi["upper"],
+                    head=zi["head"],
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     path=msg.get("path"),
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
                     loop=bool(msg.get("loop", True)),
                 )
+                set_audio_muted(bool(msg.get("audio_muted", False)))
                 print(
                     f"[engine_worker] START DEMO ok — file={result.get('capture')!r} "
                     f"output={result.get('output_name')!r}"
@@ -120,8 +136,23 @@ def main() -> int:
                 set_volume(float(msg.get("value", 0.70)))
                 _reply({"ok": True})
 
+            elif cmd == "set_audio_muted":
+                set_audio_muted(bool(msg.get("muted", False)))
+                _reply({"ok": True})
+
             elif cmd == "set_vibration":
                 set_vibration(float(msg.get("value", 0.27)))
+                _reply({"ok": True})
+
+            elif cmd == "set_vibration_muted":
+                set_vibration_muted(bool(msg.get("muted", False)))
+                _reply({"ok": True})
+
+            elif cmd == "set_zone_enabled":
+                set_zone_enabled(
+                    str(msg.get("zone", "")),
+                    bool(msg.get("enabled", True)),
+                )
                 _reply({"ok": True})
 
             elif cmd == "set_cutoff_hz" or cmd == "set_highpass_hz":

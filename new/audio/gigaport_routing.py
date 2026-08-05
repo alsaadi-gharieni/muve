@@ -4,8 +4,8 @@ Dual layout (ASIO4ALL aggregates two Gigaport eX units):
   Gigaport 1 (ch 1-8) — vibration only, each zone duplicated to a stereo pair:
     1,2 → head    (was single-unit ch 3)
     3,4 → upper   (was ch 4)
-    5,6 → legs    (was ch 5)
-    7,8 → mid     (was ch 6)
+    5,6 → mid back (was Rs / torso mid)
+    7,8 → legs    (was Ls)
 
   Gigaport 2 (ch 9-16) — audio only:
     9,10  → L/R headphones
@@ -25,8 +25,10 @@ DUAL_GIGAPORT_CHANNELS = 16
 AUDIO_GIGAPORT_OFFSET = 8
 MIN_DUAL_CHANNELS = DUAL_GIGAPORT_CHANNELS
 
-OutputLayout = Literal["single", "dual_asio4all", "dual_native"]
+OutputLayout = Literal["single", "dual_asio4all", "dual_native", "vibration_only"]
 SpeakerRoute = Literal["headphones", "secondary"]
+
+VIBRATION_ONLY_CHANNELS = 8
 
 
 def is_asio4all_name(name: str) -> bool:
@@ -36,9 +38,46 @@ def is_asio4all_name(name: str) -> bool:
 def output_channels_for_layout(layout: OutputLayout) -> int:
     if layout == "dual_asio4all":
         return DUAL_GIGAPORT_CHANNELS
-    if layout == "dual_native":
-        return 8
+    if layout in ("dual_native", "vibration_only"):
+        return VIBRATION_ONLY_CHANNELS
     return SATORI_OUTPUT_CHANNELS
+
+
+def build_vibration_only_block(
+    vib: np.ndarray,
+    *,
+    channels: int = VIBRATION_ONLY_CHANNELS,
+) -> np.ndarray:
+    """Map 4-zone vibration to Gigaport outputs — one stereo pair per body row.
+
+    vib columns: head, upper, legs, mid (same order as LiveStreamProcessor).
+
+    Physical wiring (8-ch vibration Gigaport):
+      ch 1,2 → head
+      ch 3,4 → upper back
+      ch 5,6 → mid back
+      ch 7,8 → legs
+
+    Each row is duplicated L/R on the bed (left + right shaker per zone).
+    """
+    n = len(vib)
+    ch = max(1, int(channels))
+    out = np.zeros((n, ch), dtype=np.float32)
+    if n <= 0:
+        return out
+
+    vib = np.clip(vib[:n], -1.0, 1.0).astype(np.float32, copy=False)
+    head, upper, legs, mid = vib[:, 0], vib[:, 1], vib[:, 2], vib[:, 3]
+    zone_pairs = ((head, head), (upper, upper), (mid, mid), (legs, legs))
+    for pair_idx, (left, right) in enumerate(zone_pairs):
+        out_l = pair_idx * 2
+        out_r = pair_idx * 2 + 1
+        if out_l < ch:
+            out[:, out_l] = left
+        if out_r < ch:
+            out[:, out_r] = right
+
+    return out
 
 
 def build_output_block(
@@ -68,10 +107,10 @@ def build_output_block(
         out[:, 1] = head
         out[:, 2] = upper
         out[:, 3] = upper
-        out[:, 4] = legs
-        out[:, 5] = legs
-        out[:, 6] = mid
-        out[:, 7] = mid
+        out[:, 4] = mid
+        out[:, 5] = mid
+        out[:, 6] = legs
+        out[:, 7] = legs
         if speaker_route == "secondary":
             out[:, 10:12] = audio
         else:

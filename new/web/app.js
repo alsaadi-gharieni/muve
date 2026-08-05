@@ -9,6 +9,15 @@ const MockApi = (() => {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
     speaker_route: "headphones", output_layout: null,
     live_mode: null,
+    zone_enabled: { head: true, upper: true, mid: true, legs: true },
+    audio_muted: false,
+    vibration_muted: false,
+    live_input: {
+      ready: true,
+      mode: "cable",
+      capture_name: "CABLE Output",
+      message: "Bluetooth ready — play music on the phone, then press Play",
+    },
     track: { title: "Weightless", artist: "Marconi Union", album: "Ambient Transmissions", duration: 486, artwork: "assets/artwork.svg" },
     bluetooth: {
       connected_id: null, connecting_id: null, scanning: false,
@@ -16,6 +25,17 @@ const MockApi = (() => {
     },
     media: { ok: true, can_seek: true, can_prev: true, can_next: true },
     demo: { available: true, error: null },
+    hardware: {
+      gigaport_connected: true,
+      gigaport_count: 1,
+      gigaport_name: "GIGAPORT eX",
+      codec_connected: false,
+      codec_name: null,
+      headphones_kind: null,
+      battery_percent: 72,
+      charging: false,
+      battery_available: true,
+    },
     devices: [],
     nearby_devices: [],
   };
@@ -61,7 +81,7 @@ const MockApi = (() => {
       state.live_mode = on ? "demo" : null;
       if (on) {
         state.track = {
-          title: "Demo", artist: "MUVI test track", album: "assets/demo.wav",
+          title: "Demo", artist: "MUVI test track", album: "",
           duration: 30, artwork: "assets/artwork.svg",
         };
         state.position = 0;
@@ -73,8 +93,30 @@ const MockApi = (() => {
     seek: async (s) => { state.position = Math.max(0, Math.min(state.track.duration, s)); return snap(); },
     previous_track: async () => { state.position = 0; return snap(); },
     next_track: async () => { state.position = 0; if (state.live_mode !== "demo") state.track.title = "Next Track"; return snap(); },
-    set_volume: async (v) => { state.volume = v; return snap(); },
-    set_vibration: async (v) => { state.vibration = v; return snap(); },
+    set_volume: async (v) => {
+      state.volume = v;
+      state.audio_muted = Number(v) <= 0;
+      return snap();
+    },
+    set_vibration: async (v) => {
+      state.vibration = v;
+      state.vibration_muted = Number(v) <= 0;
+      return snap();
+    },
+    set_zone_enabled: async (zone, enabled) => {
+      const k = String(zone).toLowerCase();
+      if (state.zone_enabled[k] !== undefined) state.zone_enabled[k] = Boolean(enabled);
+      if (enabled) state.vibration_muted = false;
+      return snap();
+    },
+    set_audio_muted: async (muted) => {
+      state.audio_muted = Boolean(muted);
+      return snap();
+    },
+    set_vibration_muted: async (muted) => {
+      state.vibration_muted = Boolean(muted);
+      return snap();
+    },
     set_highpass_hz: async (v) => { state.highpass_hz = v; state.cutoff_hz = v; return snap(); },
     set_speaker_route: async (route) => {
       state.speaker_route = route === "secondary" ? "secondary" : "headphones";
@@ -192,7 +234,6 @@ let lastState = { playing: false };
 let lastDevicesSig = "";
 let lastNearbySig = "";
 let lastBtAlert = "";
-let lastAudioSettingsSig = "";
 
 // Bass cutoff UI: 0% = deepest (40 Hz), 100% = brightest (250 Hz). Default 76% ≈ 200 Hz.
 const CUTOFF_HZ_MIN = 40;
@@ -236,6 +277,115 @@ const VIZ_ZONES = [
   // Stereo audio channels (speakers) — driven by the music itself.
  
 ];
+
+const VIB_ZONE_UI = [
+  { key: "head", label: "Head", color: "#008000" },
+  { key: "upper", label: "Upper back", color: "#FFFF00" },
+  { key: "mid", label: "Mid back", color: "#FFA500" },
+  { key: "legs", label: "Legs", color: "#FF0000" },
+];
+
+const zoneMuteOnSvg =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor"/><path d="M17 8a5 5 0 010 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+const zoneMuteOffSvg =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 5V4L9 9H5z" fill="currentColor"/><path d="M23 3L3 23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+function buildVibZoneRows(containerId) {
+  const container = el(containerId);
+  if (!container || container.dataset.built) return;
+  container.dataset.built = "1";
+  VIB_ZONE_UI.forEach((z) => {
+    const row = document.createElement("div");
+    row.className = "vib-zone-row";
+    row.dataset.zone = z.key;
+    const dot = document.createElement("span");
+    dot.className = "vib-zone-dot";
+    dot.style.backgroundColor = z.color;
+    dot.style.color = z.color;
+    const label = document.createElement("span");
+    label.className = "vib-zone-label";
+    label.textContent = z.label;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "zone-mute-btn";
+    btn.dataset.zone = z.key;
+    btn.title = `Mute ${z.label} vibration`;
+    const iconOn = document.createElement("span");
+    iconOn.className = "zone-mute-icon icon-on";
+    iconOn.innerHTML = zoneMuteOnSvg;
+    const iconOff = document.createElement("span");
+    iconOff.className = "zone-mute-icon icon-off";
+    iconOff.innerHTML = zoneMuteOffSvg;
+    btn.appendChild(iconOn);
+    btn.appendChild(iconOff);
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const nextEnabled = btn.classList.contains("muted");
+      if (api.set_zone_enabled) {
+        render(await api.set_zone_enabled(z.key, nextEnabled));
+      }
+    });
+    row.appendChild(dot);
+    row.appendChild(label);
+    row.appendChild(btn);
+    container.appendChild(row);
+  });
+}
+
+function renderHeadphonesMute(s) {
+  const muted = Boolean(s.audio_muted);
+  ["headphonesMuteBtn", "demoHeadphonesMuteBtn"].forEach((id) => {
+    const btn = el(id);
+    if (!btn) return;
+    const stateKey = muted ? "1" : "0";
+    if (btn.dataset.muteState === stateKey) return;
+    btn.dataset.muteState = stateKey;
+    btn.classList.toggle("muted", muted);
+    btn.title = muted ? "Unmute audio" : "Mute audio";
+    btn.setAttribute("aria-label", btn.title);
+  });
+}
+
+function renderVibrationMute(s) {
+  const muted = Boolean(s.vibration_muted);
+  ["vibrationMuteBtn", "demoVibrationMuteBtn"].forEach((id) => {
+    const btn = el(id);
+    if (!btn) return;
+    const stateKey = muted ? "1" : "0";
+    if (btn.dataset.muteState === stateKey) return;
+    btn.dataset.muteState = stateKey;
+    btn.classList.toggle("muted", muted);
+    btn.title = muted ? "Unmute vibration" : "Mute vibration";
+    btn.setAttribute("aria-label", btn.title);
+  });
+}
+
+function renderVibZoneRows(s) {
+  const enabled = s.zone_enabled || {};
+  const vibMuted = Boolean(s.vibration_muted);
+  ["vibZoneRows", "demoVibZoneRows"].forEach((id) => {
+    const container = el(id);
+    if (!container) return;
+    container.classList.toggle("all-muted", vibMuted);
+    container.querySelectorAll(".vib-zone-row").forEach((row) => {
+      const zone = row.dataset.zone;
+      const on = Boolean(enabled[zone]) && !vibMuted;
+      row.classList.toggle("muted", !on);
+      const btn = row.querySelector(".zone-mute-btn");
+      if (!btn) return;
+      const stateKey = `zone:${zone}:${Boolean(enabled[zone])}:vm:${vibMuted}`;
+      if (btn.dataset.zoneState === stateKey) return;
+      btn.dataset.zoneState = stateKey;
+      btn.classList.toggle("muted", !Boolean(enabled[zone]));
+      const label = VIB_ZONE_UI.find((z) => z.key === zone)?.label || zone;
+      btn.title = enabled[zone] ? `Mute ${label} vibration` : `Enable ${label} vibration`;
+      btn.setAttribute("aria-label", btn.title);
+    });
+  });
+  renderHeadphonesMute(s);
+  renderVibrationMute(s);
+}
 
 function loadVizPositions() {
   if (!VIZ_EDIT_MODE) return {};
@@ -409,12 +559,20 @@ function applyShaker(sh) {
 function updateViz(s) {
   const playing = Boolean(s && s.playing);
   const zoneRms = s && s.zone_rms;
+  const zoneEnabled = s && s.zone_enabled;
+  const audioMuted = Boolean(s && s.audio_muted);
+  const vibMuted = Boolean(s && s.vibration_muted);
   vizInstances.forEach((shakers) =>
     shakers.forEach((sh) => {
       let rms = 0;
       if (playing) {
         // Older backends don't send zone_rms — fall back to overall input level.
         rms = zoneRms ? zoneRms[sh.zone] : Number(s.input_rms || 0);
+        if (sh.zone === "left" || sh.zone === "right") {
+          if (audioMuted) rms = 0;
+        } else if (vibMuted || (zoneEnabled && zoneEnabled[sh.zone] === false)) {
+          rms = 0;
+        }
       }
       const target = rmsToIntensity(rms);
       // Gentle attack/release so wave size drifts instead of jumping,
@@ -431,10 +589,157 @@ const busyIcon = '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor
 const pauseIcon = '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/>';
 const playIconSvg = '<path d="M8 5v14l11-7z" fill="currentColor"/>';
 
+const statusIconNowPlaying =
+  '<svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="16" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+const statusIconDemo =
+  '<svg viewBox="0 0 24 24"><path d="M12 3v10M8 7l4-4 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="14" width="16" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+const statusIconBluetooth =
+  '<svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const statusIconIdle =
+  '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+function navigateToScreen(screenId) {
+  const navBtn = document.querySelector(`.nav-item[data-screen="${screenId}"]`);
+  if (!navBtn || !el(`screen-${screenId}`)) return;
+  document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
+  navBtn.classList.add("active");
+  document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
+  el(`screen-${screenId}`).classList.add("active");
+}
+
+function shortCaptureName(name) {
+  return String(name || "").replace(/\s*\[.*?\]\s*/g, "").trim();
+}
+
 // ------------------------------------------------------------------ render --
+let lastHardwareSig = "";
+let lastSettingsSig = "";
+
+function setHwItem(rootId, connected, title) {
+  const item = el(rootId);
+  if (!item) return;
+  item.classList.toggle("ok", connected);
+  item.classList.toggle("bad", !connected);
+  if (title) item.title = title;
+}
+
+function formatHwDeviceName(name, fallback) {
+  const n = shortCaptureName(name);
+  if (n) return n;
+  return fallback || "Not detected";
+}
+
+function setHwDetailRow(rowId, connected, deviceName, inUse) {
+  const row = el(rowId);
+  const deviceEl = el(`${rowId}Device`);
+  const statusEl = el(`${rowId}Status`);
+  if (!row) return;
+  row.classList.toggle("ok", connected && !inUse);
+  row.classList.toggle("bad", !connected);
+  row.classList.toggle("live", inUse);
+  if (deviceEl) {
+    deviceEl.textContent = connected ? deviceName : "Not detected";
+  }
+  if (statusEl) {
+    if (inUse) {
+      statusEl.textContent = "Playing";
+      statusEl.className = "hw-detail-status live";
+    } else if (connected) {
+      statusEl.textContent = "Connected";
+      statusEl.className = "hw-detail-status ok";
+    } else {
+      statusEl.textContent = "Not connected";
+      statusEl.className = "hw-detail-status bad";
+    }
+  }
+}
+
+function renderSettingsStatus(hw, state) {
+  if (!el("hwRowGigaport")) return;
+  const sig = JSON.stringify({ hw, playing: Boolean(state?.playing) });
+  if (sig === lastSettingsSig) return;
+  lastSettingsSig = sig;
+
+  const playing = Boolean(state?.playing);
+  const gOk = Boolean(hw?.gigaport_connected);
+  const cOk = Boolean(hw?.codec_connected);
+  const gCount = Number(hw?.gigaport_count || 0);
+  let gName = formatHwDeviceName(hw?.gigaport_name, "Gigaport");
+  if (gCount > 1) gName = `${gName} (${gCount} units)`;
+  const cName = formatHwDeviceName(
+    hw?.codec_name,
+    hw?.headphones_kind === "gigaport" ? "Gigaport" : "USB Audio CODEC",
+  );
+
+  setHwDetailRow("hwRowGigaport", gOk, gName, playing && gOk);
+  setHwDetailRow("hwRowCodec", cOk, cName, playing && cOk);
+
+  const batRow = el("hwRowBattery");
+  const batVisible = Boolean(hw?.battery_available);
+  if (batRow) batRow.hidden = !batVisible;
+  if (!batVisible) return;
+
+  const pctNum = hw.battery_percent;
+  const pct = pctNum != null ? `${pctNum}%` : "—";
+  const charging = Boolean(hw.charging);
+  const deviceEl = el("hwRowBatteryDevice");
+  const statusEl = el("hwRowBatteryStatus");
+  if (deviceEl) deviceEl.textContent = pct;
+  if (statusEl) {
+    statusEl.textContent = charging ? "Charging" : "On battery";
+    statusEl.className = charging ? "hw-detail-status ok" : "hw-detail-status bad";
+  }
+  if (batRow) {
+    batRow.classList.toggle("ok", charging);
+    batRow.classList.toggle("bad", !charging);
+    batRow.classList.remove("live");
+  }
+}
+
+function renderHardwareStatus(hw, playing = false, state = null) {
+  if (!hw) return;
+  const sig = JSON.stringify(hw);
+  if (sig !== lastHardwareSig) {
+    lastHardwareSig = sig;
+    lastSettingsSig = "";
+
+    const gCount = Number(hw.gigaport_count || 0);
+    const gTitle = hw.gigaport_connected
+      ? `Gigaport · ${formatHwDeviceName(hw.gigaport_name, "connected")}${gCount > 1 ? ` (${gCount})` : ""}`
+      : "Gigaport not detected";
+    const cTitle = hw.codec_connected
+      ? `Headphones · ${formatHwDeviceName(hw.codec_name, "connected")}`
+      : "Headphones not detected";
+
+    setHwItem("hwGigaport", hw.gigaport_connected, gTitle);
+    setHwItem("hwCodec", hw.codec_connected, cTitle);
+
+    const batVisible = Boolean(hw.battery_available);
+    const batEl = el("hwBattery");
+    if (batEl) batEl.hidden = !batVisible;
+    if (batVisible) {
+      const pctNum = hw.battery_percent;
+      const pct = pctNum != null ? `${pctNum}%` : "—";
+      const pctEl = el("hwBatteryPct");
+      if (pctEl) pctEl.textContent = pct;
+      const charging = Boolean(hw.charging);
+      const batTitle = charging ? `Charging · ${pct}` : `Battery · ${pct}`;
+      if (batEl) {
+        batEl.classList.toggle("ok", charging);
+        batEl.classList.toggle("bad", !charging);
+        batEl.title = batTitle;
+      }
+    }
+  }
+  renderSettingsStatus(hw, state || lastState);
+}
+
 function render(s) {
   if (!s) return;
   lastState = s;
+  const liveOn = isLivePlaying(s);
+  const demoOn = isDemoPlaying(s);
+  renderHardwareStatus(s.hardware, liveOn || demoOn, s);
   // Pop pairing guidance once (e.g. status 19 FAILED → forget on phone).
   const alertMsg = s.bluetooth && s.bluetooth.alert;
   if (alertMsg && alertMsg !== lastBtAlert) {
@@ -447,22 +752,25 @@ function render(s) {
     lastBtAlert = "";
   }
 
-  const liveOn = isLivePlaying(s);
-  const demoOn = isDemoPlaying(s);
   const busy = Boolean(s.play_busy) || playClickLock;
   const demoBusy = Boolean(s.play_busy) || demoPlayClickLock;
+
+  const liveInput = s.live_input || {};
+  const liveInputReady = Boolean(liveInput.ready);
+  const canStartLive = liveOn || liveInputReady;
 
   // Now playing (Live / AUX / Bluetooth only)
   el("npTitle").textContent = demoOn ? "Ready" : s.track.title;
   el("npArtist").textContent = demoOn ? "Phone audio" : s.track.artist;
-  el("npAlbum").textContent = demoOn
-    ? "AUX: plug in → Play · Bluetooth: Connect → play phone → Play"
-    : s.track.album;
+  const albumText = demoOn ? "" : (s.track.album || "");
+  el("npAlbum").textContent = albumText;
+  el("npAlbum").hidden = !albumText;
 
   updateViz(s);
 
   const playBtn = el("playBtn");
-  playBtn.disabled = busy;
+  playBtn.disabled = busy || (!liveOn && !canStartLive);
+  playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
   playBtn.classList.toggle("busy", busy);
   playBtn.setAttribute("aria-busy", busy ? "true" : "false");
   el("playIcon").innerHTML = busy ? busyIcon : (liveOn ? pauseIcon : playIconSvg);
@@ -476,20 +784,12 @@ function render(s) {
 
   const hint = el("liveHint");
   if (hint) {
-    const capture = String(s.capture_name || "");
-    const isAux = /behringer|umc|usb audio|line/i.test(capture);
     if (busy && !demoOn) {
-      hint.textContent = liveOn ? "Stopping…" : "Starting Live — please wait…";
+      hint.textContent = liveOn ? "Stopping…" : "Starting…";
     } else if (s.engine_error && !demoOn) {
-      hint.textContent = `Live failed: ${s.engine_error}`;
-    } else if (liveOn) {
-      const rms = Number(s.input_rms || 0);
-      const waiting = isAux
-        ? "no AUX signal — play music on the phone"
-        : "no signal on CABLE — play music on the phone";
-      const signal = rms > 0.002 ? `receiving audio (${rms.toFixed(3)})` : waiting;
-      const out = s.output_name ? ` → ${s.output_name}` : "";
-      hint.textContent = `Live ON · ${capture || "capture"}${out} · ${signal}`;
+      hint.textContent = s.engine_error;
+    } else if (!liveOn && !liveInputReady) {
+      hint.textContent = liveInput.message || "Connect AUX or Bluetooth to start.";
     } else {
       hint.textContent = "";
     }
@@ -519,6 +819,7 @@ function render(s) {
   el("volVal").textContent = `${Math.round(s.volume * 100)}%`;
   el("vibration").value = Math.round(s.vibration * 100);
   el("vibVal").textContent = `${Math.round(s.vibration * 100)}%`;
+  renderVibZoneRows(s);
   const cutoffPct = cutoffHzToPct(s.cutoff_hz ?? s.highpass_hz);
   el("highpass").value = cutoffPct;
   el("hpVal").textContent = `${cutoffPct}%`;
@@ -530,31 +831,29 @@ function render(s) {
   // (2 ch) has no separate pair, so hide the toggle entirely for it.
   const routeCapable = dualOut && audioCh >= 4;
   const route = s.speaker_route === "secondary" ? "secondary" : "headphones";
-  const routeHintText = route === "secondary"
-    ? "Audio on Gigaport 2 · outputs 3–4"
-    : "Audio on Gigaport 2 · outputs 1–2";
-  // Render both the Now Playing and Demo copies of the audio-output toggle.
   [
-    ["speakerRouteCard", "routeHeadphones", "routeSpeaker", "speakerRouteHint"],
-    ["demoSpeakerRouteCard", "demoRouteHeadphones", "demoRouteSpeaker", "demoSpeakerRouteHint"],
-  ].forEach(([cardId, hpId, spkId, hintId]) => {
+    ["speakerRouteCard", "routeHeadphones", "routeSpeaker"],
+    ["demoSpeakerRouteCard", "demoRouteHeadphones", "demoRouteSpeaker"],
+  ].forEach(([cardId, hpId, spkId]) => {
     const routeCard = el(cardId);
     if (!routeCard) return;
     routeCard.classList.toggle("hidden", !routeCapable);
     el(hpId)?.classList.toggle("active", route === "headphones");
     el(spkId)?.classList.toggle("active", route === "secondary");
-    const routeHint = el(hintId);
-    if (routeHint) routeHint.textContent = routeHintText;
   });
 
-  // Demo screen (same controls, demo.wav)
+  // Demo screen
   if (el("demoTitle")) {
     const demoTrack = demoOn
       ? s.track
-      : { title: "Demo", artist: "MUVI test track", album: "assets/demo.wav", duration: s.track?.duration || 0, artwork: "assets/artwork.svg" };
+      : { title: "Demo", artist: "MUVI test track", album: "", duration: s.track?.duration || 0, artwork: "assets/artwork.svg" };
     el("demoTitle").textContent = demoTrack.title || "Demo";
     el("demoArtist").textContent = demoTrack.artist || "MUVI test track";
-    el("demoAlbum").textContent = demoTrack.album || "assets/demo.wav";
+    const demoAlbum = el("demoAlbum");
+    if (demoAlbum) {
+      demoAlbum.textContent = "";
+      demoAlbum.hidden = true;
+    }
 
     const demoPlayBtn = el("demoPlayBtn");
     demoPlayBtn.disabled = demoBusy;
@@ -588,47 +887,90 @@ function render(s) {
     const demoHint = el("demoHint");
     if (demoHint) {
       if (demoBusy) {
-        demoHint.textContent = demoOn ? "Stopping…" : "Starting demo — please wait…";
+        demoHint.textContent = demoOn ? "Stopping…" : "Starting…";
       } else if (s.demo && s.demo.error) {
-        demoHint.textContent = `Demo failed: ${s.demo.error}`;
-      } else if (demoOn) {
-        const out = s.output_name ? ` → ${s.output_name}` : "";
-        demoHint.textContent = `Demo ON · demo.wav${out}`;
+        demoHint.textContent = s.demo.error;
       } else if (s.demo && s.demo.available === false) {
-        demoHint.textContent = "demo.wav not found in assets/";
+        demoHint.textContent = "Demo track not found";
       } else {
         demoHint.textContent = "";
       }
     }
   }
 
-  // Bottom-left status: AUX Live, Bluetooth name, Demo, or idle
+  // Sidebar status — tap to open Now Playing, Demo, or Bluetooth
   const sidebarConn = el("sidebarConn");
   const mode = s.live_mode || "";
   const capture = String(s.capture_name || "");
+  const captureShort = shortCaptureName(capture).slice(0, 36);
   const isAuxLive = liveOn && (mode === "aux" || /behringer|umc|usb audio|line/i.test(capture));
   const rms = Number(s.input_rms || 0);
-  let sidebarText = "Not connected";
-  let sidebarOnline = false;
+  const hasSignal = rms > 0.002;
+
+  let statusTitle = "Ready";
+  let statusSub = "AUX or Bluetooth";
+  let statusIcon = statusIconIdle;
+  let statusClass = "idle";
+  let navigateTarget = "bluetooth";
+
   if (demoOn) {
-    sidebarOnline = true;
-    sidebarText = "Demo · demo.wav";
-  } else if (isAuxLive) {
-    sidebarOnline = true;
-    const short =
-      capture.replace(/\s*\[.*?\]\s*/g, "").trim().slice(0, 28) || "AUX";
-    sidebarText = rms > 0.002 ? `AUX Live · ${short}` : `AUX Live · waiting…`;
-  } else if (liveOn && mode === "cable") {
-    sidebarOnline = true;
-    sidebarText = rms > 0.002 ? "Bluetooth Live · signal" : "Bluetooth Live · waiting…";
+    statusClass = "live-demo";
+    statusTitle = "Demo playing";
+    statusSub = "Tap to open";
+    statusIcon = statusIconDemo;
+    navigateTarget = "demo";
+  } else if (liveOn) {
+    statusClass = "live-now";
+    statusIcon = statusIconNowPlaying;
+    navigateTarget = "now-playing";
+    if (isAuxLive) {
+      statusTitle = "Now Playing";
+      statusSub = hasSignal ? "AUX" : "Waiting for audio…";
+    } else if (mode === "cable") {
+      statusTitle = "Now Playing";
+      statusSub = hasSignal ? "Bluetooth" : "Waiting for audio…";
+    } else {
+      statusTitle = "Now Playing";
+      statusSub = captureShort || "Live";
+    }
   } else if (online) {
-    sidebarOnline = true;
-    sidebarText = connected.name;
-  } else if (s.bluetooth && s.bluetooth.error && /bluetooth is off|disconnected|unavailable/i.test(String(s.bluetooth.error))) {
-    sidebarText = String(s.bluetooth.error).split(".")[0];
+    statusClass = "bt-connected";
+    statusTitle = connected.name;
+    statusSub = "Connected";
+    statusIcon = statusIconBluetooth;
+    navigateTarget = "bluetooth";
+  } else if (liveInput.ready && liveInput.mode === "aux") {
+    statusClass = "ready";
+    statusTitle = "AUX ready";
+    statusSub = shortCaptureName(liveInput.capture_name) || "Ready to play";
+    statusIcon = statusIconNowPlaying;
+    navigateTarget = "now-playing";
+  } else if (liveInput.ready && liveInput.mode === "cable") {
+    statusClass = "ready";
+    statusTitle = "Bluetooth ready";
+    statusSub = "Ready to play";
+    statusIcon = statusIconNowPlaying;
+    navigateTarget = "now-playing";
+  } else if (s.bluetooth?.error && /bluetooth is off|disconnected|unavailable/i.test(String(s.bluetooth.error))) {
+    statusSub = String(s.bluetooth.error).split(".")[0];
+    navigateTarget = "bluetooth";
+  } else if (liveInput.message) {
+    statusSub = liveInput.message;
+    navigateTarget = "bluetooth";
   }
-  sidebarConn.classList.toggle("online", sidebarOnline);
-  el("sidebarConnText").textContent = sidebarText;
+
+  if (sidebarConn) {
+    sidebarConn.className = "conn-pill";
+    sidebarConn.classList.add(statusClass);
+    if (navigateTarget) sidebarConn.classList.add("navigable");
+    sidebarConn.dataset.navigate = navigateTarget || "";
+    const iconEl = el("sidebarConnIcon");
+    if (iconEl) iconEl.innerHTML = statusIcon;
+    const titleEl = el("sidebarConnTitle");
+    if (titleEl) titleEl.textContent = statusTitle;
+    const subEl = el("sidebarConnSub");
+    if (subEl) subEl.textContent = statusSub;
+  }
 
   el("statusCard").classList.toggle("online", online || isAuxLive);
   const bt = s.bluetooth;
@@ -685,69 +1027,6 @@ function render(s) {
 
   renderDevices(s);
   renderNearby(s);
-}
-
-function statusClass(status) {
-  if (status === "active") return "ok";
-  if (status === "available") return "warn";
-  return "bad";
-}
-
-function statusLabel(status) {
-  if (status === "active") return "✓ Active";
-  if (status === "available") return "Available";
-  if (status === "blocked") return "Blocked";
-  return "Hidden";
-}
-
-async function renderAudioSettings(force = false) {
-  if (!el("audioDevicesTableBody")) return;
-  const settings = await api.get_audio_settings();
-  const sig = JSON.stringify(settings || {});
-  if (!force && sig === lastAudioSettingsSig) return;
-  lastAudioSettingsSig = sig;
-
-  const rows = Array.isArray(settings.devices) ? settings.devices : [];
-  const vibSel = el("vibrationOutputSelect");
-  const audSel = el("audioOutputSelect");
-  if (vibSel && audSel) {
-    // Vibration must be a Gigaport; audio can be any usable stereo device
-    // (a 2nd Gigaport, or a plain interface like the Behringer UFO202).
-    const gigaports = rows.filter((d) => d.is_gigaport && d.usable);
-    const audioDevs = rows.filter((d) => d.usable && (d.channels || 0) >= 2);
-    vibSel.innerHTML = `<option value="">Auto</option>${gigaports
-      .map((d) => `<option value="${d.index}">#${d.index} ${d.name} (${d.hostapi})</option>`)
-      .join("")}`;
-    audSel.innerHTML = `<option value="">Auto</option>${audioDevs
-      .map((d) => `<option value="${d.index}">#${d.index} ${d.name} (${d.hostapi})</option>`)
-      .join("")}`;
-    vibSel.value = settings.selected_vibration_index == null ? "" : String(settings.selected_vibration_index);
-    audSel.value = settings.selected_audio_index == null ? "" : String(settings.selected_audio_index);
-  }
-
-  const body = el("audioDevicesTableBody");
-  body.innerHTML = rows
-    .map((d) => `
-      <tr>
-        <td><span class="status-pill ${statusClass(d.status)}">${statusLabel(d.status)}</span></td>
-        <td>${d.role || "—"}</td>
-        <td>${d.name}</td>
-        <td>${d.hostapi}</td>
-        <td>${d.channels || 0}</td>
-      </tr>
-    `)
-    .join("");
-
-  const title = el("audioStatusTitle");
-  const sub = el("audioStatusSub");
-  if (!settings.auto_pick_ok) {
-    title.textContent = "Output auto-pick failed";
-    sub.textContent = settings.auto_pick_error || "Check driver and USB connections.";
-  } else {
-    title.textContent = settings.active ? "Audio engine running ✓" : "Audio engine idle";
-    const warn = (settings.warnings || []).join(" · ");
-    sub.textContent = warn || `Backend: ${settings.backend || "wasapi/wdm-ks"} · layout: ${settings.output_layout || "single"}`;
-  }
 }
 
 function devicesSig(s) {
@@ -894,25 +1173,28 @@ function renderNearby(s) {
 // ------------------------------------------------------------------ events --
 function wire() {
   document.querySelectorAll(".nav-item").forEach((b) =>
-    b.addEventListener("click", () => {
-      document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
-      b.classList.add("active");
-      document.querySelectorAll(".screen").forEach((sc) => sc.classList.remove("active"));
-      el("screen-" + b.dataset.screen).classList.add("active");
-      if (b.dataset.screen === "settings") {
-        renderAudioSettings(true);
-      }
-    })
+    b.addEventListener("click", () => navigateToScreen(b.dataset.screen))
   );
+
+  el("sidebarConn")?.addEventListener("click", () => {
+    const target = el("sidebarConn")?.dataset.navigate;
+    if (target) navigateToScreen(target);
+  });
+
+  el("hwStatusRow")?.addEventListener("click", () => {
+    navigateToScreen("settings");
+  });
 
   el("playBtn").addEventListener("click", async () => {
     if (playClickLock) return;
-    playClickLock = true;
     const wasPlaying = Boolean(lastState.playing);
+    const inputReady = Boolean(lastState.live_input && lastState.live_input.ready);
+    if (!wasPlaying && !inputReady) return;
+    playClickLock = true;
     el("playBtn").disabled = true;
     el("playBtn").classList.add("busy");
     const hint = el("liveHint");
-    if (hint) hint.textContent = wasPlaying ? "Stopping…" : "Starting Live — please wait…";
+    if (hint) hint.textContent = wasPlaying ? "Stopping…" : "Starting…";
     try {
       render(await api.toggle_play());
     } finally {
@@ -954,6 +1236,34 @@ function wire() {
     el("volVal").textContent = `${el("volume").value}%`;
     render(await api.set_volume(el("volume").value / 100));
   });
+
+  const toggleHeadphonesMute = async (btn) => {
+    if (!btn || !api.set_audio_muted) return;
+    const muted = !btn.classList.contains("muted");
+    render(await api.set_audio_muted(muted));
+  };
+  el("headphonesMuteBtn")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    await toggleHeadphonesMute(el("headphonesMuteBtn"));
+  });
+  el("demoHeadphonesMuteBtn")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    await toggleHeadphonesMute(el("demoHeadphonesMuteBtn"));
+  });
+
+  const toggleVibrationMute = async (btn) => {
+    if (!btn || !api.set_vibration_muted) return;
+    const muted = !btn.classList.contains("muted");
+    render(await api.set_vibration_muted(muted));
+  };
+  el("vibrationMuteBtn")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    await toggleVibrationMute(el("vibrationMuteBtn"));
+  });
+  el("demoVibrationMuteBtn")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    await toggleVibrationMute(el("demoVibrationMuteBtn"));
+  });
   el("vibration").addEventListener("input", async () => {
     el("vibVal").textContent = `${el("vibration").value}%`;
     render(await api.set_vibration(el("vibration").value / 100));
@@ -964,7 +1274,7 @@ function wire() {
     render(await api.set_highpass_hz(pctToCutoffHz(pct)));
   });
 
-  document.querySelectorAll(".route-btn").forEach((btn) => {
+  document.querySelectorAll(".route-icon-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const route = btn.getAttribute("data-route") || "headphones";
       if (api.set_speaker_route) {
@@ -982,7 +1292,7 @@ function wire() {
       el("demoPlayBtn").disabled = true;
       el("demoPlayBtn").classList.add("busy");
       const hint = el("demoHint");
-      if (hint) hint.textContent = wasDemo ? "Stopping…" : "Starting demo — please wait…";
+      if (hint) hint.textContent = wasDemo ? "Stopping…" : "Starting…";
       try {
         render(await api.toggle_demo_play());
       } finally {
@@ -1053,40 +1363,18 @@ function wire() {
     render(await api.forget_all_devices());
   });
 
-  el("refreshAudioBtn")?.addEventListener("click", async () => {
-    if (api.refresh_audio_devices) {
-      await api.refresh_audio_devices();
-    }
-    await renderAudioSettings(true);
-  });
-
-  el("saveAudioSelectionBtn")?.addEventListener("click", async () => {
-    const vibRaw = el("vibrationOutputSelect")?.value;
-    const audRaw = el("audioOutputSelect")?.value;
-    const vib = vibRaw === "" ? null : Number(vibRaw);
-    const aud = audRaw === "" ? null : Number(audRaw);
-    if (api.set_output_devices) {
-      await api.set_output_devices(vib, aud);
-    }
-    await renderAudioSettings(true);
-    render(await api.get_state());
-  });
 }
 
 // -------------------------------------------------------------------- boot --
 async function boot() {
   bindApi();
+  buildVibZoneRows("vibZoneRows");
+  buildVibZoneRows("demoVibZoneRows");
   wire();
   initViz();
   render(await api.get_state());
-  await renderAudioSettings(true);
   setInterval(async () => {
     if (!seeking && !demoSeeking) render(await api.get_state());
-    // Only refresh device settings while the Settings screen is open, so we
-    // don't hit the audio worker every tick during playback.
-    if (el("screen-settings")?.classList.contains("active")) {
-      await renderAudioSettings();
-    }
   }, 400);
 }
 

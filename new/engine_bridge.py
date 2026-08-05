@@ -130,6 +130,9 @@ class EngineBridge:
         speaker_route: str = "headphones",
         vibration_output_index: int | None = None,
         audio_output_index: int | None = None,
+        zone_enabled: dict[str, bool] | None = None,
+        audio_muted: bool = False,
+        vibration_muted: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             if self._running:
@@ -154,6 +157,9 @@ class EngineBridge:
                         "speaker_route": str(speaker_route),
                         "vibration_output_index": vibration_output_index,
                         "audio_output_index": audio_output_index,
+                        "zone_enabled": zone_enabled,
+                        "audio_muted": audio_muted,
+                        "vibration_muted": vibration_muted,
                     },
                     timeout=20.0,
                 )
@@ -203,6 +209,9 @@ class EngineBridge:
         loop: bool = True,
         vibration_output_index: int | None = None,
         audio_output_index: int | None = None,
+        zone_enabled: dict[str, bool] | None = None,
+        audio_muted: bool = False,
+        vibration_muted: bool = False,
     ) -> dict[str, Any]:
         """Play assets/demo.wav through the same Gigaport vibration path."""
         with self._lock:
@@ -218,6 +227,9 @@ class EngineBridge:
                     "vibration_output_index": vibration_output_index,
                     "audio_output_index": audio_output_index,
                     "loop": bool(loop),
+                    "zone_enabled": zone_enabled,
+                    "audio_muted": audio_muted,
+                    "vibration_muted": vibration_muted,
                 }
                 if path:
                     msg["path"] = path
@@ -333,12 +345,43 @@ class EngineBridge:
             except Exception:  # noqa: BLE001
                 pass
 
+    def set_audio_muted(self, muted: bool) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_audio_muted", "muted": bool(muted)})
+            except Exception:  # noqa: BLE001
+                pass
+
     def set_vibration(self, value: float) -> None:
         with self._lock:
             if not self._running:
                 return
             try:
                 self._send({"cmd": "set_vibration", "value": float(value)})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def set_vibration_muted(self, muted: bool) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_vibration_muted", "muted": bool(muted)})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def set_zone_enabled(self, zone: str, enabled: bool) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({
+                    "cmd": "set_zone_enabled",
+                    "zone": str(zone),
+                    "enabled": bool(enabled),
+                })
             except Exception:  # noqa: BLE001
                 pass
 

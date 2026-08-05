@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import os
 import sys
 import threading
 import time
@@ -24,6 +25,7 @@ from audio.gigaport_routing import (
     OutputLayout,
     SpeakerRoute,
     build_output_block,
+    build_vibration_only_block,
     output_channels_for_layout,
 )
 from audio.output_devices import wasapi_output_extra
@@ -297,6 +299,14 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
         "airpods",
         "hands-free",
         "stereo mix",
+        "macbook",
+        "imac",
+        "built-in",
+        "builtin",
+        "internal",
+        "facetime",
+        "microsoft teams",
+        "teams audio",
     )
 
     def _name(dev: dict[str, Any]) -> str:
@@ -389,7 +399,7 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
             name = str(raw["name"])
             name_l = name.lower()
             if int(raw["max_input_channels"]) > 0 and not _skip_name(name_l):
-                if _is_aux_name(name_l) or not any(b in name_l for b in builtin):
+                if _is_aux_name(name_l):
                     hostapis = sd.query_hostapis()
                     try:
                         api = str(hostapis[int(raw["hostapi"])]["name"])
@@ -430,10 +440,6 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
         return None
     scored.sort(key=lambda t: (-t[0], _name(t[1])))
     chosen = scored[0][1]
-    print(
-        f"[pick_aux] selected score={scored[0][0]} "
-        f"name={chosen.get('name')!r} index={chosen.get('index')}"
-    )
     return chosen
 
 
@@ -735,6 +741,7 @@ class LiveAudioEngine:
         self.vibration_output_channels: int | None = None
         self.audio_output_channel_count = 4
         self.volume = 0.85
+        self.audio_muted = False
         self.highpass_hz = MUVI_HIGHPASS_HZ
         self.lowpass_hz = MUVI_LOWPASS_HZ
         self.intensity_mid = 1.0
@@ -778,7 +785,7 @@ class LiveAudioEngine:
             self.output_channel_count = output_channels_for_layout(self.output_layout)
 
     def set_output_layout(self, layout: OutputLayout) -> None:
-        if layout not in ("single", "dual_asio4all", "dual_native"):
+        if layout not in ("single", "dual_asio4all", "dual_native", "vibration_only"):
             raise ValueError(f"Unknown output layout: {layout}")
         self.output_layout = layout
         if not self.vibration_overlay:
@@ -801,6 +808,9 @@ class LiveAudioEngine:
         if not self.vibration_overlay:
             self.output_channel_count = self.vibration_output_channels
 
+    def _effective_audio_gain(self) -> float:
+        return 0.0 if self.audio_muted else float(self.volume)
+
     def _passthrough_speakers(self, capture: np.ndarray) -> np.ndarray:
         """Fast L/R path — no vibration processing, avoids speaker dropouts."""
         if capture.ndim == 1:
@@ -812,7 +822,7 @@ class LiveAudioEngine:
             stereo = resample_if_needed(stereo, self.input_sample_rate, PROCESSING_SR)
         if self.output_sample_rate != PROCESSING_SR:
             stereo = resample_if_needed(stereo, PROCESSING_SR, self.output_sample_rate)
-        return (stereo * self.volume).astype(np.float32)
+        return (stereo * self._effective_audio_gain()).astype(np.float32)
 
     def _render_vibration_only(
         self,
@@ -928,7 +938,7 @@ class LiveAudioEngine:
         if len(stereo) == 0:
             return
 
-        vol = float(self.volume)
+        vol = self._effective_audio_gain()
         left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
         right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
 
@@ -1030,7 +1040,7 @@ class LiveAudioEngine:
         mono = stereo.mean(axis=1)
         input_level = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2) + 1e-10))
         # Audio L/R reflect what actually reaches the speakers: capture × volume.
-        vol = float(self.volume)
+        vol = self._effective_audio_gain()
         left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
         right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
 
@@ -1055,33 +1065,29 @@ class LiveAudioEngine:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
             vib = self._render_vibration_only(chunk, already_processing_sr=True)
-            audio = chunk.astype(np.float32, copy=False) * self.volume
+            audio = chunk.astype(np.float32, copy=False) * self._effective_audio_gain()
             if self.output_sample_rate != PROCESSING_SR:
                 audio = resample_if_needed(audio, PROCESSING_SR, self.output_sample_rate)
             n = min(len(audio), len(vib))
-            if self.output_layout == "dual_native":
-                vib_ch = int(self.vibration_output_channels or 8)
-                vib_out = np.zeros((n, vib_ch), dtype=np.float32)
-                # muvi8-style division: every row is a stereo pair of shakers.
-                #   odd outputs  (ch1,3,5,7) <- Left  tactile band
-                #   even outputs (ch2,4,6,8) <- Right tactile band
-                # vib cols are [head, upper, legs, mid]; head/legs are Left-derived
-                # and upper/mid Right-derived at equal gain (one Vibration slider),
-                # so head = Left band and upper = Right band.
-                left_band = vib[:n, 0]
-                right_band = vib[:n, 1]
-                for c in range(vib_ch):
-                    vib_out[:, c] = left_band if c % 2 == 0 else right_band
-
-                audio_ch = int(self.audio_output_channel_count)
-                audio_out = np.zeros((n, audio_ch), dtype=np.float32)
-                if self.speaker_route == "secondary" and audio_ch >= 4:
-                    audio_out[:, 2:4] = np.clip(audio[:n], -1.0, 1.0)
-                elif audio_ch >= 2:
-                    audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
+            if self.output_layout in ("dual_native", "vibration_only"):
+                vib_ch = int(
+                    self.vibration_output_channels
+                    or output_channels_for_layout(self.output_layout)
+                )
+                vib_out = build_vibration_only_block(vib[:n], channels=vib_ch)
                 self._push_vibration_block(vib_out)
-                with self.lock:
-                    self._audio_output_ring.append(audio_out)
+                if (
+                    self.output_layout == "dual_native"
+                    and self.audio_output_device_index is not None
+                ):
+                    audio_ch = int(self.audio_output_channel_count)
+                    audio_out = np.zeros((n, audio_ch), dtype=np.float32)
+                    if self.speaker_route == "secondary" and audio_ch >= 4:
+                        audio_out[:, 2:4] = np.clip(audio[:n], -1.0, 1.0)
+                    elif audio_ch >= 2:
+                        audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
+                    with self.lock:
+                        self._audio_output_ring.append(audio_out)
             else:
                 block = build_output_block(
                     audio[:n],
@@ -1141,6 +1147,9 @@ class LiveAudioEngine:
 
     def set_volume(self, volume: float) -> None:
         self.volume = float(np.clip(volume, 0.0, 1.2))
+
+    def set_audio_muted(self, muted: bool) -> None:
+        self.audio_muted = bool(muted)
 
     def set_highpass_hz(self, hz: float) -> None:
         self.highpass_hz = float(np.clip(hz, 0.0, 120.0))
@@ -1800,11 +1809,20 @@ class LiveAudioEngine:
         self._cb_frames += frames
         self._cb_silent_frames += (frames - offset)
         if prev // 48000 != self._cb_frames // 48000:
-            print(
-                f"[live_input] vib cb: served={self._cb_frames} "
-                f"silent={self._cb_silent_frames} ring={len(self._output_ring)}",
-                flush=True,
-            )
+            # Per-channel peak proves whether ch 1-2 (indices 0-1) carry vibration.
+            peaks = [
+                float(np.max(np.abs(output[:, c]))) if output.shape[1] > c else 0.0
+                for c in range(min(ch_count, 8))
+            ]
+            # Quiet by default — set MUVE_AUDIO_DEBUG=1 to print callback stats.
+            if os.environ.get("MUVE_AUDIO_DEBUG"):
+                peak_txt = " ".join(f"{i + 1}:{p:.3f}" for i, p in enumerate(peaks))
+                print(
+                    f"[live_input] vib cb: served={self._cb_frames} "
+                    f"silent={self._cb_silent_frames} ring={len(self._output_ring)} "
+                    f"peaks[{peak_txt}]",
+                    flush=True,
+                )
 
     def _audio_output_callback(self, outdata, frames, _time_info, _status) -> None:
         needed = frames
@@ -1846,8 +1864,9 @@ class LiveAudioEngine:
         self._audio_cb_frames += frames
         self._audio_cb_silent_frames += (frames - offset)
         if prev // 48000 != self._audio_cb_frames // 48000:
-            print(
-                f"[live_input] audio cb: served={self._audio_cb_frames} "
-                f"silent={self._audio_cb_silent_frames} ring={len(self._audio_output_ring)}",
-                flush=True,
-            )
+            if os.environ.get("MUVE_AUDIO_DEBUG"):
+                print(
+                    f"[live_input] audio cb: served={self._audio_cb_frames} "
+                    f"silent={self._audio_cb_silent_frames} ring={len(self._audio_output_ring)}",
+                    flush=True,
+                )

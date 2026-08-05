@@ -179,6 +179,21 @@ def _group_units(gigaports: list[dict[str, Any]]) -> dict[str, list[dict[str, An
     return units
 
 
+def _short_device_name(name: str) -> str:
+    return re.sub(r"\s*\[.*?\]\s*", "", str(name)).strip()
+
+
+def settings_display_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Usable outputs for Settings UI — one Gigaport endpoint per physical unit."""
+    usable = [d for d in devices if d.get("usable")]
+    gigaports = [d for d in usable if d.get("is_gigaport")]
+    non_gig = [d for d in usable if not d.get("is_gigaport")]
+    units = _group_units(gigaports)
+    gig_display = [units[k][0] for k in sorted(units.keys())]
+    non_gig.sort(key=lambda d: (-int(d.get("channels", 0)), str(d.get("name", "")).lower()))
+    return gig_display + non_gig
+
+
 def _device_label(dev: dict[str, Any]) -> str:
     return (
         f"{dev['name']} ({dev['channels']} ch, {dev['hostapi']}, #{dev['index']})"
@@ -231,26 +246,25 @@ def pick_output_devices(
         if audio is None:
             raise RuntimeError(f"Audio output device #{audio_index} not found")
     else:
-        # Audio prefers a *different* physical Gigaport unit.
-        audio = None
-        for key in sorted(units.keys()):
-            if key != vib_unit:
-                audio = units[key][0]
-                break
+        # Headphones / audio priority:
+        #   1. USB codec (Behringer / UFO202 / USB Audio CODEC)
+        #   2. Second physical Gigaport
+        audio = next(
+            (
+                d
+                for d in all_devs
+                if not d.get("is_gigaport")
+                and d["index"] != vib["index"]
+                and int(d["channels"]) >= 2
+                and is_audio_interface_name(d["name"])
+            ),
+            None,
+        )
         if audio is None:
-            # No 2nd Gigaport: use an external stereo interface (e.g. Behringer
-            # UFO202 / U-Phono) as the audio output if one is connected.
-            audio = next(
-                (
-                    d
-                    for d in all_devs
-                    if not d.get("is_gigaport")
-                    and d["index"] != vib["index"]
-                    and int(d["channels"]) >= 2
-                    and is_audio_interface_name(d["name"])
-                ),
-                None,
-            )
+            for key in sorted(units.keys()):
+                if key != vib_unit:
+                    audio = units[key][0]
+                    break
 
     # Dual: separate vibration + audio devices. A non-Gigaport audio interface
     # (UFO202) is never part of the vibration unit, so only collapse when both
@@ -277,18 +291,32 @@ def pick_output_devices(
         audio = {**audio, "probed_channels": audio_ch}
         return vib, audio, "dual_native", meta
 
-    # Single Gigaport: audio + vibration on one unit.
-    single_ch = probe_output_channels(vib["index"], 44100, (6, 4, 2))
-    if single_ch is None:
+    if same_unit:
+        # One physical Gigaport drives both audible output and vibration (legacy 6ch).
+        single_ch = probe_output_channels(vib["index"], 44100, (6, 4, 2))
+        if single_ch is None:
+            raise RuntimeError(
+                f"Cannot open output stream on {_device_label(vib)}"
+            )
+        if single_ch < 6:
+            meta["warnings"].append(
+                f"Single device supports {single_ch} ch (wanted 6) — using reduced layout"
+            )
+        vib = {**vib, "probed_channels": single_ch}
+        return vib, audio, "single", meta
+
+    # No separate audio device: all Gigaport outputs are vibration-only (no L/R on 1-2).
+    vib_ch = probe_output_channels(vib["index"], 44100, (8, 6, 4, 2))
+    if vib_ch is None:
         raise RuntimeError(
-            f"Cannot open output stream on {_device_label(vib)}"
+            f"Cannot open vibration output on {_device_label(vib)}"
         )
-    if single_ch < 6:
+    if vib_ch < 8:
         meta["warnings"].append(
-            f"Single device supports {single_ch} ch (wanted 6) — using reduced layout"
+            f"Vibration device supports {vib_ch} ch (wanted 8) — zones may be limited"
         )
-    vib = {**vib, "probed_channels": single_ch}
-    return vib, None, "single", meta
+    vib = {**vib, "probed_channels": vib_ch}
+    return vib, None, "vibration_only", meta
 
 
 def build_audio_settings(
@@ -301,8 +329,9 @@ def build_audio_settings(
     engine_error: str | None = None,
 ) -> dict[str, Any]:
     """Snapshot for the Settings screen."""
-    devices = list_output_devices(include_all=True)
-    gigaports = [d for d in devices if d.get("usable") and d.get("is_gigaport")]
+    all_devices = list_output_devices(include_all=True)
+    display_devs = settings_display_devices(all_devices)
+    gigaports = [d for d in display_devs if d.get("is_gigaport")]
     try:
         picked_vib, picked_audio, layout, meta = pick_output_devices(
             vibration_index=vibration_index,
@@ -315,26 +344,26 @@ def build_audio_settings(
         auto_ok = False
         auto_error = str(exc)
 
+    sel_vib_idx = vibration_index
+    sel_aud_idx = audio_index
+
     rows: list[dict[str, Any]] = []
-    for d in devices:
-        role = "—"
-        status = "hidden"
-        if not d.get("usable"):
-            status = "blocked"
-        else:
-            # Any usable output is selectable: Gigaports for vibration, and any
-            # stereo device (incl. the UFO202 / USB Audio CODEC) for audio.
-            status = "available"
-            if picked_vib and d["index"] == picked_vib["index"]:
-                role = "vibration"
-            elif picked_audio and d["index"] == picked_audio["index"]:
-                role = "audio"
-        if active:
-            if picked_vib and d["index"] == picked_vib["index"]:
-                status = "active"
-            elif picked_audio and d["index"] == picked_audio["index"]:
-                status = "active"
-        rows.append({**d, "role": role, "status": status})
+    for d in display_devs:
+        short = _short_device_name(d["name"])
+        status = "ready"
+        if active and picked_vib and d["index"] == picked_vib["index"]:
+            status = "active"
+        elif active and picked_audio and d["index"] == picked_audio["index"]:
+            status = "active"
+        elif vibration_index is not None and d["index"] == vibration_index:
+            status = "selected"
+        elif audio_index is not None and d["index"] == audio_index:
+            status = "selected"
+        rows.append({
+            **d,
+            "short_name": short,
+            "status": status,
+        })
 
     return {
         "backend": "wasapi/wdm-ks",
@@ -345,6 +374,10 @@ def build_audio_settings(
         "auto_pick_error": auto_error,
         "picked_vibration": picked_vib,
         "picked_audio": picked_audio,
+        "selected_vibration_index": sel_vib_idx,
+        "selected_audio_index": sel_aud_idx,
+        "in_use_vibration_index": picked_vib["index"] if active and picked_vib else None,
+        "in_use_audio_index": picked_audio["index"] if active and picked_audio else None,
         "output_layout": output_layout or layout,
         "active": active,
         "output_name": output_name,

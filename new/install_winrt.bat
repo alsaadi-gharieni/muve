@@ -22,5 +22,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Done. Now run: python app.py
+echo Done. Now run: python main.py
 pause

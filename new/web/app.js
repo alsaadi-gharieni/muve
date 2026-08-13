@@ -7,7 +7,7 @@ const el = (id) => document.getElementById(id);
 const MockApi = (() => {
   const state = {
     playing: false, play_busy: false, volume: 0.70, vibration: 0.27, highpass_hz: 200, cutoff_hz: 200, position: 0,
-    speaker_route: "headphones", output_layout: null,
+    speaker_route: "headphones", vibration_mode: "zones", output_layout: null,
     live_mode: null,
     zone_enabled: { head: true, upper: true, mid: true, legs: true },
     audio_muted: false,
@@ -32,6 +32,8 @@ const MockApi = (() => {
       codec_connected: false,
       codec_name: null,
       headphones_kind: null,
+      roles_flipped: false,
+      can_swap_gigaports: false,
       battery_percent: 72,
       charging: false,
       battery_available: true,
@@ -122,6 +124,10 @@ const MockApi = (() => {
       state.speaker_route = route === "secondary" ? "secondary" : "headphones";
       return snap();
     },
+    set_vibration_mode: async (mode) => {
+      state.vibration_mode = mode === "stereo" ? "stereo" : "zones";
+      return snap();
+    },
     get_audio_settings: async () => ({
       ok: true,
       backend: "wasapi/wdm-ks",
@@ -137,6 +143,21 @@ const MockApi = (() => {
     }),
     refresh_audio_devices: async () => MockApi.get_audio_settings(),
     set_output_devices: async () => snap(),
+    swap_gigaport_roles: async () => {
+      state.hardware.roles_flipped = !state.hardware.roles_flipped;
+      state.hardware.can_swap_gigaports = true;
+      state.hardware.gigaport_count = 2;
+      if (state.hardware.roles_flipped) {
+        state.hardware.gigaport_name = "GIGAPORT eX (B)";
+        state.hardware.codec_name = "GIGAPORT eX (A)";
+      } else {
+        state.hardware.gigaport_name = "GIGAPORT eX (A)";
+        state.hardware.codec_name = "GIGAPORT eX (B)";
+      }
+      state.hardware.headphones_kind = "gigaport";
+      state.hardware.codec_connected = true;
+      return snap();
+    },
     scan_bluetooth: async () => {
       state.bluetooth.scanning = true;
       state.bluetooth.discovering = true;
@@ -656,7 +677,9 @@ function setHwDetailRow(rowId, connected, deviceName, inUse) {
 
 function renderSettingsStatus(hw, state) {
   if (!el("hwRowGigaport")) return;
-  const sig = JSON.stringify({ hw, playing: Boolean(state?.playing) });
+  const flipped = Boolean(hw?.roles_flipped || state?.gigaport_roles_flipped);
+  const canSwap = Boolean(hw?.can_swap_gigaports) || Number(hw?.gigaport_count || 0) >= 2;
+  const sig = JSON.stringify({ hw, playing: Boolean(state?.playing), flipped, canSwap });
   if (sig === lastSettingsSig) return;
   lastSettingsSig = sig;
 
@@ -673,6 +696,19 @@ function renderSettingsStatus(hw, state) {
 
   setHwDetailRow("hwRowGigaport", gOk, gName, playing && gOk);
   setHwDetailRow("hwRowCodec", cOk, cName, playing && cOk);
+
+  const swapCard = el("gigaportSwapCard");
+  if (swapCard) swapCard.hidden = !canSwap;
+  const swapBtn = el("swapGigaportsBtn");
+  if (swapBtn) {
+    swapBtn.textContent = flipped ? "Swap back" : "Swap";
+  }
+  const hint = el("gigaportSwapHint");
+  if (hint) {
+    hint.textContent = flipped
+      ? "Roles swapped — vibration and headphones Gigaports are flipped."
+      : "Swap which unit drives vibration vs headphones.";
+  }
 
   const batRow = el("hwRowBattery");
   const batVisible = Boolean(hw?.battery_available);
@@ -756,8 +792,9 @@ function render(s) {
   const demoBusy = Boolean(s.play_busy) || demoPlayClickLock;
 
   const liveInput = s.live_input || {};
-  const liveInputReady = Boolean(liveInput.ready);
-  const canStartLive = liveOn || liveInputReady;
+  const liveInputReady = Boolean(liveInput.ready)
+    && (liveInput.mode === "aux" || liveInput.mode === "cable");
+  const canStartLive = liveInputReady;
 
   // Now playing (Live / AUX / Bluetooth only)
   el("npTitle").textContent = demoOn ? "Ready" : s.track.title;
@@ -769,7 +806,11 @@ function render(s) {
   updateViz(s);
 
   const playBtn = el("playBtn");
+  // Enable Play only with AUX or Bluetooth ready; keep enabled while Live is on (to Stop).
   playBtn.disabled = busy || (!liveOn && !canStartLive);
+  playBtn.title = liveOn
+    ? "Stop Live"
+    : (canStartLive ? "Start Live" : (liveInput.message || "Connect AUX or Bluetooth to start"));
   playBtn.classList.toggle("disabled", playBtn.disabled && !busy);
   playBtn.classList.toggle("busy", busy);
   playBtn.setAttribute("aria-busy", busy ? "true" : "false");
@@ -826,9 +867,8 @@ function render(s) {
 
   const dualOut = s.output_layout === "dual_native";
   const audioCh = Number(s.audio_output_channels || 0);
-  // The Headphones/Speaker toggle only makes sense when the audio device has a
-  // 2nd stereo pair (ch3-4). A plain stereo interface like the Behringer UFO202
-  // (2 ch) has no separate pair, so hide the toggle entirely for it.
+  // Headphones = CH1&2, Speakers = CH3&4 on the audio Gigaport (needs >=4 ch;
+  // ideally 8 so Windows does not remap Speakers onto CH5&6).
   const routeCapable = dualOut && audioCh >= 4;
   const route = s.speaker_route === "secondary" ? "secondary" : "headphones";
   [
@@ -840,6 +880,17 @@ function render(s) {
     routeCard.classList.toggle("hidden", !routeCapable);
     el(hpId)?.classList.toggle("active", route === "headphones");
     el(spkId)?.classList.toggle("active", route === "secondary");
+  });
+
+  // Vibration routing: "zones" (per body row) vs "stereo" (L/R shakers).
+  const vibMode = s.vibration_mode === "stereo" ? "stereo" : "zones";
+  [
+    ["vibModeCard", "vibModeZones", "vibModeStereo"],
+    ["demoVibModeCard", "demoVibModeZones", "demoVibModeStereo"],
+  ].forEach(([cardId, zonesId, stereoId]) => {
+    el(cardId)?.classList.toggle("hidden", !SHOW_VIBRATION_MODE_SWITCH);
+    el(zonesId)?.classList.toggle("active", vibMode === "zones");
+    el(stereoId)?.classList.toggle("active", vibMode === "stereo");
   });
 
   // Demo screen
@@ -1283,6 +1334,15 @@ function wire() {
     });
   });
 
+  document.querySelectorAll(".vib-mode-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const mode = btn.getAttribute("data-vibmode") || "zones";
+      if (api.set_vibration_mode) {
+        render(await api.set_vibration_mode(mode));
+      }
+    });
+  });
+
   // Demo tab — same controls, plays demo.wav through Live path
   if (el("demoPlayBtn")) {
     el("demoPlayBtn").addEventListener("click", async () => {
@@ -1363,11 +1423,25 @@ function wire() {
     render(await api.forget_all_devices());
   });
 
+  el("swapGigaportsBtn")?.addEventListener("click", async () => {
+    const btn = el("swapGigaportsBtn");
+    if (btn) btn.disabled = true;
+    lastHardwareSig = "";
+    lastSettingsSig = "";
+    try {
+      render(await api.swap_gigaport_roles());
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
 }
 
 // -------------------------------------------------------------------- boot --
 async function boot() {
   bindApi();
+  const verEl = el("brandVersion");
+  if (verEl && typeof APP_VERSION === "string") verEl.textContent = `v${APP_VERSION}`;
   buildVibZoneRows("vibZoneRows");
   buildVibZoneRows("demoVibZoneRows");
   wire();

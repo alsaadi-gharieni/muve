@@ -24,6 +24,7 @@ from audio.soundcard_loopback import (
 from audio.gigaport_routing import (
     OutputLayout,
     SpeakerRoute,
+    VibrationMode,
     build_output_block,
     build_vibration_only_block,
     output_channels_for_layout,
@@ -418,7 +419,6 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
                         "is_default_record": True,
                     }
                     scored.append((_score(name_l, "sounddevice", True) + 25, dev))
-                    print(f"[pick_aux] default record device: [{default_in}] {name} ({api})")
     except Exception as exc:  # noqa: BLE001
         print(f"[pick_aux] default input probe failed: {exc}")
 
@@ -737,6 +737,7 @@ class LiveAudioEngine:
         self.vibration_overlay = False
         self.output_layout: OutputLayout = "single"
         self.speaker_route: SpeakerRoute = "headphones"
+        self.vibration_mode: VibrationMode = "zones"
         self.output_channel_count = SATORI_OUTPUT_CHANNELS
         self.vibration_output_channels: int | None = None
         self.audio_output_channel_count = 4
@@ -795,6 +796,11 @@ class LiveAudioEngine:
         if route not in ("headphones", "secondary"):
             raise ValueError(f"Unknown speaker route: {route}")
         self.speaker_route = route
+
+    def set_vibration_mode(self, mode: VibrationMode) -> None:
+        if mode not in ("zones", "stereo"):
+            raise ValueError(f"Unknown vibration mode: {mode}")
+        self.vibration_mode = mode
 
     def set_output_channel_plan(
         self,
@@ -1074,7 +1080,9 @@ class LiveAudioEngine:
                     self.vibration_output_channels
                     or output_channels_for_layout(self.output_layout)
                 )
-                vib_out = build_vibration_only_block(vib[:n], channels=vib_ch)
+                vib_out = build_vibration_only_block(
+                    vib[:n], channels=vib_ch, mode=self.vibration_mode
+                )
                 self._push_vibration_block(vib_out)
                 if (
                     self.output_layout == "dual_native"
@@ -1082,6 +1090,9 @@ class LiveAudioEngine:
                 ):
                     audio_ch = int(self.audio_output_channel_count)
                     audio_out = np.zeros((n, audio_ch), dtype=np.float32)
+                    # Audio Gigaport jack map (1-based): CH1&2 headphones, CH3&4 speakers.
+                    # Must open >=4 (ideally 8) channels — a 4ch Windows Speakers
+                    # stream remaps "back" onto physical CH5&6.
                     if self.speaker_route == "secondary" and audio_ch >= 4:
                         audio_out[:, 2:4] = np.clip(audio[:n], -1.0, 1.0)
                     elif audio_ch >= 2:

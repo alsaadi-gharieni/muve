@@ -15,7 +15,7 @@ from typing import Any
 from sounddevice import PortAudioError
 
 from audio.gigaport_output import GigaportOutput
-from audio.gigaport_routing import OutputLayout, SpeakerRoute
+from audio.gigaport_routing import OutputLayout, SpeakerRoute, VibrationMode
 from audio.output_devices import pick_output_devices
 from audio.live_input import (
     DEFAULT_VIBE_SYNC_MS,
@@ -196,7 +196,11 @@ def probe_live_input(
     prefer_bluetooth: bool = False,
     vibration_overlay: bool = False,
 ) -> dict[str, Any]:
-    """Check whether Now Playing can start (AUX line-in or Bluetooth/CABLE only)."""
+    """Check whether Now Playing can start (AUX line-in or Bluetooth/CABLE only).
+
+    Bare VB-Cable without an app Bluetooth session is NOT ready — otherwise the
+    Play button stays enabled with nothing to capture.
+    """
     not_ready_msg = "Connect AUX or Bluetooth to start."
     try:
         capture, mode = _pick_capture(
@@ -210,6 +214,15 @@ def probe_live_input(
             "mode": None,
             "capture_name": None,
             "message": str(exc) or not_ready_msg,
+        }
+
+    # CABLE alone (no Bluetooth connected in the app) is not a valid Live source.
+    if mode == "cable" and not prefer_bluetooth:
+        return {
+            "ready": False,
+            "mode": None,
+            "capture_name": str(capture.get("name") or ""),
+            "message": not_ready_msg,
         }
 
     if mode not in ("aux", "cable"):
@@ -238,11 +251,13 @@ def _pick_output_devices(
     *,
     vibration_index: int | None = None,
     audio_index: int | None = None,
+    roles_flipped: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, OutputLayout, dict[str, Any]]:
     """WASAPI/WDM-KS Gigaports only — no ASIO."""
     return pick_output_devices(
         vibration_index=vibration_index,
         audio_index=audio_index,
+        roles_flipped=roles_flipped,
     )
 
 
@@ -263,8 +278,10 @@ def start_live_audio(
     synthetic_type_id: str = "sine",
     prefer_bluetooth: bool = False,
     speaker_route: SpeakerRoute = "headphones",
+    vibration_mode: VibrationMode = "zones",
     vibration_output_index: int | None = None,
     audio_output_index: int | None = None,
+    roles_flipped: bool = False,
 ) -> dict[str, Any]:
     """Start Live: BT session → CABLE; else AUX if present; else CABLE."""
     capture, mode = _pick_capture(
@@ -283,6 +300,7 @@ def start_live_audio(
     vib_dev, audio_dev, layout, pick_meta = _pick_output_devices(
         vibration_index=vibration_output_index,
         audio_index=audio_output_index,
+        roles_flipped=roles_flipped,
     )
     output_index = vib_dev["index"]
     audio_output_index = audio_dev["index"] if audio_dev is not None else None
@@ -309,6 +327,7 @@ def start_live_audio(
     _gigaport.release_output_device()
     _live_engine.set_output_layout(layout)
     _live_engine.set_speaker_route(speaker_route)
+    _live_engine.set_vibration_mode(vibration_mode)
     _live_engine.set_output_channel_plan(
         vibration_channels=int(
             vib_dev.get(
@@ -350,6 +369,7 @@ def start_live_audio(
         "output_layout": layout,
         "audio_output_channels": int(audio_dev.get("probed_channels", audio_dev.get("channels", 0))) if audio_dev else 0,
         "speaker_route": speaker_route,
+        "vibration_mode": vibration_mode,
         "pick_warnings": pick_meta.get("warnings") or [],
         "cable_default": cable_route.get("name"),
     }
@@ -393,6 +413,10 @@ def set_speaker_route(route: SpeakerRoute) -> None:
     _live_engine.set_speaker_route(route)
 
 
+def set_vibration_mode(mode: VibrationMode) -> None:
+    _live_engine.set_vibration_mode(mode)
+
+
 def get_runtime_stats() -> dict[str, float]:
     return _live_engine.get_runtime_stats()
 
@@ -405,6 +429,7 @@ def get_audio_settings(
     audio_index: int | None = None,
     output_name: str | None = None,
     engine_error: str | None = None,
+    roles_flipped: bool = False,
 ) -> dict[str, Any]:
     from audio.output_devices import build_audio_settings
 
@@ -415,6 +440,7 @@ def get_audio_settings(
         audio_index=audio_index,
         output_name=output_name,
         engine_error=engine_error,
+        roles_flipped=roles_flipped,
     )
 
 

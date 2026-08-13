@@ -115,8 +115,10 @@ def start_demo_audio(
     highpass_hz: float = 30.0,
     cutoff_hz: float = 200.0,
     path: str | None = None,
+    vibration_mode: str = "zones",
     vibration_output_index: int | None = None,
     audio_output_index: int | None = None,
+    roles_flipped: bool = False,
     loop: bool = True,
 ) -> dict[str, Any]:
     """Play demo.wav through LiveAudioEngine → Gigaport (same as Bluetooth Live)."""
@@ -141,6 +143,7 @@ def start_demo_audio(
     output_dev, audio_dev, layout, _pick_meta = _pick_output_devices(
         vibration_index=vibration_output_index,
         audio_index=audio_output_index,
+        roles_flipped=roles_flipped,
     )
     output_index = output_dev["index"]
     audio_output_index = audio_dev["index"] if audio_dev is not None else None
@@ -157,6 +160,7 @@ def start_demo_audio(
     _gigaport.stop()
     _gigaport.release_output_device()
     _engine.set_output_layout(layout)
+    _engine.set_vibration_mode(vibration_mode)  # type: ignore[arg-type]
     _engine.set_output_channel_plan(
         vibration_channels=int(
             output_dev.get(
@@ -196,6 +200,7 @@ def start_demo_audio(
         "mode": "demo",
         "output_layout": layout,
         "audio_output_channels": int(audio_dev.get("probed_channels", audio_dev.get("channels", 0))) if audio_dev else 0,
+        "vibration_mode": vibration_mode,
         "duration": duration,
         "path": resolved,
         "title": _demo_meta["title"],

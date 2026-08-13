@@ -35,11 +35,13 @@ class EngineBridge:
         if self._proc is not None and self._proc.poll() is None:
             return
         if getattr(sys, "frozen", False):
-            # PyInstaller build: sys.executable is app.exe; re-exec with a flag
-            # that app.py intercepts and routes to engine_worker.main().
+            # PyInstaller build: sys.executable is main.exe; re-exec with a flag
+            # that main.py intercepts and routes to engine_worker.main().
+            # Do NOT spawn main.py as a script here — that would start another UI.
             cmd = [sys.executable, "--engine-worker"]
             stderr = subprocess.DEVNULL  # windowed exe has no console to inherit
         else:
+            # Dev: spawn engine_worker.py directly (keeps WinRT out of the audio process).
             cmd = [sys.executable, "-u", self._worker_path]
             stderr = None  # inherit — show worker logs in the same console
         self._proc = subprocess.Popen(
@@ -128,8 +130,10 @@ class EngineBridge:
         highpass_hz: float | None = None,
         prefer_bluetooth: bool = False,
         speaker_route: str = "headphones",
+        vibration_mode: str = "zones",
         vibration_output_index: int | None = None,
         audio_output_index: int | None = None,
+        roles_flipped: bool = False,
         zone_enabled: dict[str, bool] | None = None,
         audio_muted: bool = False,
         vibration_muted: bool = False,
@@ -155,8 +159,10 @@ class EngineBridge:
                         "cutoff_hz": float(cutoff_hz),
                         "prefer_bluetooth": bool(prefer_bluetooth),
                         "speaker_route": str(speaker_route),
+                        "vibration_mode": str(vibration_mode),
                         "vibration_output_index": vibration_output_index,
                         "audio_output_index": audio_output_index,
+                        "roles_flipped": bool(roles_flipped),
                         "zone_enabled": zone_enabled,
                         "audio_muted": audio_muted,
                         "vibration_muted": vibration_muted,
@@ -197,6 +203,7 @@ class EngineBridge:
                 "output_layout": result.get("output_layout"),
                 "audio_output_channels": result.get("audio_output_channels"),
                 "speaker_route": result.get("speaker_route"),
+                "vibration_mode": result.get("vibration_mode"),
             }
 
     def start_demo(
@@ -207,8 +214,10 @@ class EngineBridge:
         highpass_hz: float | None = None,
         path: str | None = None,
         loop: bool = True,
+        vibration_mode: str = "zones",
         vibration_output_index: int | None = None,
         audio_output_index: int | None = None,
+        roles_flipped: bool = False,
         zone_enabled: dict[str, bool] | None = None,
         audio_muted: bool = False,
         vibration_muted: bool = False,
@@ -224,8 +233,10 @@ class EngineBridge:
                     "volume": float(volume),
                     "vibration": float(vibration),
                     "cutoff_hz": float(cutoff_hz),
+                    "vibration_mode": str(vibration_mode),
                     "vibration_output_index": vibration_output_index,
                     "audio_output_index": audio_output_index,
+                    "roles_flipped": bool(roles_flipped),
                     "loop": bool(loop),
                     "zone_enabled": zone_enabled,
                     "audio_muted": audio_muted,
@@ -266,6 +277,7 @@ class EngineBridge:
                 "mode": "demo",
                 "output_layout": result.get("output_layout"),
                 "audio_output_channels": result.get("audio_output_channels"),
+                "vibration_mode": result.get("vibration_mode"),
                 "duration": result.get("duration"),
                 "title": result.get("title"),
                 "artist": result.get("artist"),
@@ -407,6 +419,15 @@ class EngineBridge:
             except Exception:  # noqa: BLE001
                 pass
 
+    def set_vibration_mode(self, mode: str) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            try:
+                self._send({"cmd": "set_vibration_mode", "mode": str(mode)})
+            except Exception:  # noqa: BLE001
+                pass
+
     def get_audio_settings(
         self,
         *,
@@ -415,6 +436,7 @@ class EngineBridge:
         audio_output_index: int | None = None,
         output_name: str | None = None,
         engine_error: str | None = None,
+        roles_flipped: bool = False,
     ) -> dict[str, Any]:
         # Only talk to the worker when it's already running — and under the
         # same lock as every other _send so a concurrent Settings poll can never
@@ -435,6 +457,7 @@ class EngineBridge:
                             "audio_output_index": audio_output_index,
                             "output_name": output_name,
                             "engine_error": engine_error,
+                            "roles_flipped": bool(roles_flipped),
                         },
                         timeout=8.0,
                     )
@@ -453,6 +476,7 @@ class EngineBridge:
                 audio_index=audio_output_index,
                 output_name=output_name,
                 engine_error=engine_error,
+                roles_flipped=roles_flipped,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc), "devices": []}

@@ -32,6 +32,7 @@ from live_audio import (  # noqa: E402
     prepare_zone_intensities,
     set_cutoff_hz,
     set_speaker_route,
+    set_vibration_mode,
     set_audio_muted,
     set_vibration,
     set_vibration_muted,
@@ -79,8 +80,10 @@ def main() -> int:
                     vibration_overlay=False,
                     prefer_bluetooth=bool(msg.get("prefer_bluetooth", False)),
                     speaker_route=str(msg.get("speaker_route", "headphones")),
+                    vibration_mode=str(msg.get("vibration_mode", "zones")),
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
+                    roles_flipped=bool(msg.get("roles_flipped", False)),
                 )
                 set_audio_muted(bool(msg.get("audio_muted", False)))
                 print(
@@ -106,8 +109,10 @@ def main() -> int:
                     head=zi["head"],
                     cutoff_hz=float(msg.get("cutoff_hz", msg.get("highpass_hz", 200.0))),
                     path=msg.get("path"),
+                    vibration_mode=str(msg.get("vibration_mode", "zones")),
                     vibration_output_index=msg.get("vibration_output_index"),
                     audio_output_index=msg.get("audio_output_index"),
+                    roles_flipped=bool(msg.get("roles_flipped", False)),
                     loop=bool(msg.get("loop", True)),
                 )
                 set_audio_muted(bool(msg.get("audio_muted", False)))
@@ -167,6 +172,14 @@ def main() -> int:
                     set_speaker_route(route)  # type: ignore[arg-type]
                     _reply({"ok": True, "speaker_route": route})
 
+            elif cmd == "set_vibration_mode":
+                vmode = str(msg.get("mode", "zones"))
+                if vmode not in ("zones", "stereo"):
+                    _reply({"ok": False, "error": f"bad vibration mode: {vmode}"})
+                else:
+                    set_vibration_mode(vmode)  # type: ignore[arg-type]
+                    _reply({"ok": True, "vibration_mode": vmode})
+
             elif cmd == "audio_settings":
                 settings = get_audio_settings(
                     active=is_active(),
@@ -175,6 +188,7 @@ def main() -> int:
                     audio_index=msg.get("audio_output_index"),
                     output_name=msg.get("output_name"),
                     engine_error=msg.get("engine_error"),
+                    roles_flipped=bool(msg.get("roles_flipped", False)),
                 )
                 _reply({"ok": True, **settings})
 

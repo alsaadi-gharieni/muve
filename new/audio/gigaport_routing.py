@@ -8,9 +8,11 @@ Dual layout (ASIO4ALL aggregates two Gigaport eX units):
     7,8 → legs    (was Ls)
 
   Gigaport 2 (ch 9-16) — audio only:
-    9,10  → L/R headphones
-    11,12 → L/R secondary speaker
+    9,10  → L/R headphones   (unit CH1&2)
+    11,12 → L/R speakers     (unit CH3&4)
     Switch between the two pairs at runtime (inactive pair is silent).
+    Open the audio unit as 8ch when possible — a 4ch WASAPI Speakers
+    stream remaps the second pair onto physical CH5&6.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ MIN_DUAL_CHANNELS = DUAL_GIGAPORT_CHANNELS
 
 OutputLayout = Literal["single", "dual_asio4all", "dual_native", "vibration_only"]
 SpeakerRoute = Literal["headphones", "secondary"]
+# "zones"  = one body zone per stereo pair (ch1-2 head, 3-4 upper, 5-6 mid, 7-8 legs).
+# "stereo" = left channel to all left shakers (odd ch), right to all right shakers (even ch).
+VibrationMode = Literal["zones", "stereo"]
 
 VIBRATION_ONLY_CHANNELS = 8
 
@@ -47,18 +52,21 @@ def build_vibration_only_block(
     vib: np.ndarray,
     *,
     channels: int = VIBRATION_ONLY_CHANNELS,
+    mode: VibrationMode = "zones",
 ) -> np.ndarray:
-    """Map 4-zone vibration to Gigaport outputs — one stereo pair per body row.
+    """Map 4-zone vibration to the 8 Gigaport outputs.
 
     vib columns: head, upper, legs, mid (same order as LiveStreamProcessor).
+    head/legs are Left-derived, upper/mid are Right-derived (equal gain).
 
-    Physical wiring (8-ch vibration Gigaport):
-      ch 1,2 → head
-      ch 3,4 → upper back
-      ch 5,6 → mid back
-      ch 7,8 → legs
+    mode="zones" (one body zone per stereo pair):
+      ch 1,2 → head    ch 3,4 → upper back
+      ch 5,6 → mid back ch 7,8 → legs
+      Each zone drives both shakers of its row.
 
-    Each row is duplicated L/R on the bed (left + right shaker per zone).
+    mode="stereo" (plain left/right):
+      odd  outputs ch 1,3,5,7 → Left channel  (all left shakers)
+      even outputs ch 2,4,6,8 → Right channel (all right shakers)
     """
     n = len(vib)
     ch = max(1, int(channels))
@@ -68,6 +76,14 @@ def build_vibration_only_block(
 
     vib = np.clip(vib[:n], -1.0, 1.0).astype(np.float32, copy=False)
     head, upper, legs, mid = vib[:, 0], vib[:, 1], vib[:, 2], vib[:, 3]
+
+    if mode == "stereo":
+        # head is the Left tactile band, upper is the Right tactile band.
+        left_band, right_band = head, upper
+        for c in range(ch):
+            out[:, c] = left_band if c % 2 == 0 else right_band
+        return out
+
     zone_pairs = ((head, head), (upper, upper), (mid, mid), (legs, legs))
     for pair_idx, (left, right) in enumerate(zone_pairs):
         out_l = pair_idx * 2

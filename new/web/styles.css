@@ -56,7 +56,9 @@ html, body {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   box-shadow: 0 0 18px rgba(250, 45, 72, 0.7);
 }
+.brand-text { display: flex; flex-direction: column; line-height: 1.1; }
 .brand-name { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+.brand-version { font-size: 11px; font-weight: 500; color: var(--text-dim); letter-spacing: 0.02em; }
 
 .nav { display: flex; flex-direction: column; gap: 4px; }
 .nav-item {
@@ -213,6 +215,34 @@ html, body {
 .hw-detail-status.live {
   color: #20c020;
   background: rgba(32, 192, 32, 0.14);
+}
+
+.hw-swap-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 14px 0 4px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.hw-swap-card[hidden] { display: none !important; }
+.hw-swap-text { flex: 1; min-width: 0; }
+.hw-swap-text strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.hw-swap-text .subtle {
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+}
+.hw-swap-card .btn-ghost {
+  flex-shrink: 0;
+  min-width: 96px;
 }
 
 .conn-pill {
@@ -667,56 +697,59 @@ html, body {
   line-height: 1.4;
 }
 
-/* Sliders pinned top-right, stacked — out of the layout flow (mirrors the steps) */
+/* Sliders pinned top-right, stacked — use full height (no inner scroll). */
 .sliders {
   position: absolute;
   top: 16px;
   right: 20px;
-  width: 320px;
+  bottom: 16px;
+  width: 300px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   z-index: 5;
+  overflow: visible;
 }
 .slider-card {
   background: var(--panel);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius);
-  padding: 10px 14px;
+  padding: 8px 12px;
   backdrop-filter: blur(24px);
+  flex-shrink: 0;
 }
 .slider-head {
   display: flex; align-items: center; gap: 8px;
   font-size: 12px; font-weight: 600; color: var(--text-dim);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .slider-head svg { width: 16px; height: 16px; color: var(--accent); flex-shrink: 0; }
 .slider-val { margin-left: auto; color: var(--text); font-variant-numeric: tabular-nums; }
 .vol-mute-btn {
   margin-left: 6px;
-  width: 40px;
-  height: 40px;
-  min-width: 40px;
-  min-height: 40px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
   border-radius: 10px;
 }
 .vol-mute-btn .zone-mute-icon {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 .vol-mute-btn .zone-mute-icon svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 .slider-hint { margin-top: 6px; font-size: 11px; color: var(--text-faint); line-height: 1.35; }
 
 .vib-zone-rows {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 .vib-zone-rows.all-muted {
   opacity: 0.45;
@@ -726,12 +759,12 @@ html, body {
 .vib-zone-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
   transition: opacity 0.15s;
-  min-height: 48px;
+  min-height: 36px;
 }
 .vib-zone-row.muted { opacity: 0.42; }
 .vib-zone-dot {
@@ -748,11 +781,11 @@ html, body {
   line-height: 1.2;
 }
 .zone-mute-btn {
-  width: 48px;
-  height: 48px;
-  min-width: 48px;
-  min-height: 48px;
-  border-radius: 12px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-dim);
@@ -798,16 +831,16 @@ html, body {
 .speaker-route-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 .speaker-route-row.hidden { display: none; }
 .route-icon-btn {
   width: 100%;
-  min-height: 52px;
-  border-radius: 12px;
+  min-height: 40px;
+  border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.05);
   color: var(--text-dim);
@@ -816,8 +849,8 @@ html, body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 8px 6px;
+  gap: 2px;
+  padding: 6px 4px;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
@@ -840,6 +873,41 @@ html, body {
 }
 .route-icon-btn:active { transform: scale(0.97); }
 .route-icon-btn.active {
+  background: rgba(10, 132, 255, 0.2);
+  border-color: rgba(10, 132, 255, 0.5);
+  color: #5ac8fa;
+}
+
+/* Vibration routing toggle (Zones vs Stereo L/R) */
+.vib-mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.vib-mode-row.hidden { display: none; }
+.vib-mode-btn {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 6px 4px;
+  touch-action: manipulation;
+}
+.vib-mode-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+.vib-mode-btn:active { transform: scale(0.97); }
+.vib-mode-btn.active {
   background: rgba(10, 132, 255, 0.2);
   border-color: rgba(10, 132, 255, 0.5);
   color: #5ac8fa;
@@ -1043,6 +1111,9 @@ html, body {
     max-width: 1240px;
     margin-top: auto;
     z-index: 6;
+  }
+  .sliders {
+    z-index: 7;
   }
   .np-title { font-size: 30px; }
   .np-artist { font-size: 17px; }

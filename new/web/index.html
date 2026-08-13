@@ -12,7 +12,10 @@
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-dot"></span>
-        <span class="brand-name">MUVI</span>
+        <span class="brand-text">
+          <span class="brand-name">MUVI</span>
+          <span class="brand-version" id="brandVersion"></span>
+        </span>
       </div>
 
       <nav class="nav">
@@ -171,6 +174,10 @@
                 </div>
                 <input type="range" id="vibration" min="0" max="100" value="27" class="range" />
                 <div class="vib-zone-rows" id="vibZoneRows"></div>
+                <div class="vib-mode-row" id="vibModeCard" aria-label="Vibration routing">
+                  <button type="button" class="vib-mode-btn active" id="vibModeZones" data-vibmode="zones" title="Each body row drives its own stereo pair">Zones</button>
+                  <button type="button" class="vib-mode-btn" id="vibModeStereo" data-vibmode="stereo" title="Left channel to left shakers, right channel to right shakers">Stereo L/R</button>
+                </div>
               </div>
 
               <div class="slider-card">
@@ -281,6 +288,10 @@
                 </div>
                 <input type="range" id="demoVibration" min="0" max="100" value="27" class="range" />
                 <div class="vib-zone-rows" id="demoVibZoneRows"></div>
+                <div class="vib-mode-row" id="demoVibModeCard" aria-label="Vibration routing">
+                  <button type="button" class="vib-mode-btn active" id="demoVibModeZones" data-vibmode="zones" title="Each body row drives its own stereo pair">Zones</button>
+                  <button type="button" class="vib-mode-btn" id="demoVibModeStereo" data-vibmode="stereo" title="Left channel to left shakers, right channel to right shakers">Stereo L/R</button>
+                </div>
               </div>
 
               <div class="slider-card">
@@ -363,6 +374,15 @@
             </div>
             <span class="hw-detail-status bad" id="hwRowCodecStatus">Not connected</span>
           </li>
+        </ul>
+        <div class="hw-swap-card" id="gigaportSwapCard" hidden>
+          <div class="hw-swap-text">
+            <strong>Gigaport roles</strong>
+            <p class="subtle" id="gigaportSwapHint">Swap which unit drives vibration vs headphones.</p>
+          </div>
+          <button type="button" class="btn-ghost" id="swapGigaportsBtn">Swap</button>
+        </div>
+        <ul class="hw-detail-list" aria-label="Battery status">
           <li class="hw-detail-row hw-detail-battery" id="hwRowBattery" hidden>
             <span class="hw-detail-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z" fill="currentColor"/></svg>
@@ -378,6 +398,7 @@
     </main>
   </div>
 
+  <script src="constants.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

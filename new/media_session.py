@@ -3,7 +3,7 @@
 Primary: Windows SMTC when available.
 Fallback: media keys (prev/next) + Live elapsed timer in the app UI.
 
-Requires on Windows (same Python that runs app.py):
+Requires on Windows (same Python that runs main.py):
   python -m pip install winrt-runtime winrt-Windows.Media.Control ^
       winrt-Windows.Foundation.Collections winrt-Windows.Foundation
 """

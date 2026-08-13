@@ -7,7 +7,7 @@ scipy>=1.11
 sounddevice>=0.4.6
 soundcard>=0.4.3 ; sys_platform == "win32"
 
-# Bluetooth + media session (WinRT). Install with the SAME python that runs app.py:
+# Bluetooth + media session (WinRT). Install with the SAME python that runs main.py:
 #   python -m pip install -r requirements.txt
 winrt-runtime>=3.2.1 ; sys_platform == "win32"
 winrt-Windows.Media.Audio>=3.2.1 ; sys_platform == "win32"

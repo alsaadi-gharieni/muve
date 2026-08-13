@@ -44,20 +44,20 @@ Console:
 **Easiest fix for WinRT errors on the tablet:** double-click `install_winrt.bat` in `D:\muvi_new`, wait for `SUCCESS`, then:
 
 ```bat
-python app.py
+python main.py
 ```
 
-`app.py` also auto-installs missing WinRT packages on startup into the same Python.
+`main.py` also auto-installs missing WinRT packages on startup into the same Python.
 
 Manual:
 
 ```bat
 cd D:\muvi_new
 python -m pip install -r requirements.txt
-python app.py
+python main.py
 ```
 
-Always use `python -m pip` (not bare `pip`) so packages go into the same Python as `app.py`.
+Always use `python -m pip` (not bare `pip`) so packages go into the same Python as `main.py`.
 
 Close the old muve app before Play (ASIO exclusive).
 
@@ -68,7 +68,7 @@ cd D:\muvi_new
 python -c "import sys; print(sys.executable)"
 python -m pip install --force-reinstall winrt-runtime winrt-Windows.Foundation.Collections winrt-Windows.Media.Control winrt-Windows.Foundation
 python -c "import winrt.windows.foundation.collections; print('OK')"
-python app.py
+python main.py
 
 
 
@@ -79,7 +79,7 @@ Disable the Windows Update service using Windows-Update-Blocker-main
 
 
 
-pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" app.py
+pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" main.py
 
 
 
@@ -92,6 +92,10 @@ timeout /t 15 /nobreak >nul
 cd /d "%~dp0app"
 
 "C:\Users\RLX-Satori\AppData\Local\Programs\Python\Python313\python.exe" ^
-"%~dp0app\app.py" > "%~dp0startup_log.txt" 2>&1
+"%~dp0app\main.py" > "%~dp0startup_log.txt" 2>&1
 
 endlocal
+
+
+
+pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" main.py

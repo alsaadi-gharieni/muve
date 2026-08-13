@@ -135,3 +135,9 @@ If your goal is a production kiosk where updates should never run, these are the
 
 
 
+
+
+
+
+
+pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" main.py

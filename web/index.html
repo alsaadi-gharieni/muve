@@ -336,14 +336,18 @@
           </div>
         </div>
 
-        <div class="list-head">
-          <h2 class="list-title">Paired phones</h2>
-          <button class="btn-ghost danger sm" id="forgetAllBtn">Forget all</button>
+        <div class="bt-section bt-section-paired">
+          <div class="list-head">
+            <h2 class="list-title">Paired phones</h2>
+            <button class="btn-ghost danger sm" id="forgetAllBtn">Forget all</button>
+          </div>
+          <ul class="device-list" id="deviceList"></ul>
         </div>
-        <ul class="device-list" id="deviceList"></ul>
 
-        <h2 class="list-title">Nearby — tap Pair</h2>
-        <ul class="device-list" id="nearbyList"></ul>
+        <div class="bt-section bt-section-nearby">
+          <h2 class="list-title">Nearby — tap Pair</h2>
+          <ul class="device-list" id="nearbyList"></ul>
+        </div>
       </section>
 
       <section class="screen" id="screen-settings">
@@ -398,7 +402,7 @@
     </main>
   </div>
 
-  <script src="constants.js"></script>
+  <script src="constants/constants.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

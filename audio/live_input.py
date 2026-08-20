@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import collections
+import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +21,15 @@ from audio.soundcard_loopback import (
     list_speaker_loopback_devices,
     soundcard_available,
 )
+from audio.gigaport_routing import (
+    OutputLayout,
+    SpeakerRoute,
+    VibrationMode,
+    build_output_block,
+    build_vibration_only_block,
+    output_channels_for_layout,
+)
+from audio.output_devices import wasapi_output_extra
 from audio.vibration_presets import (
     SATORI_OUTPUT_CHANNELS,
 )
@@ -216,11 +227,13 @@ def pick_cable_capture_device() -> dict[str, Any] | None:
         "cable" in _name(d) or "vb-audio" in _name(d)
     )]
 
+    # 1) CABLE Output (recording end) — what you hear after phone hits CABLE Input.
     for key in ("cable output", "vb-audio point"):
         for dev in cableish:
             if key in _name(dev):
                 return dev
 
+    # 2) CABLE Input speaker loopback (★ DEFAULT when Windows playback = CABLE Input).
     for dev in cableish:
         name = _name(dev)
         if "output" in name and "input" not in name:
@@ -228,6 +241,7 @@ def pick_cable_capture_device() -> dict[str, Any] | None:
         if dev.get("loopback") or "loopback" in name or "speaker" in name:
             return dev
 
+    # 3) Any remaining CABLE / VB-Audio capture that is not a bare "CABLE In" mic.
     for dev in cableish:
         name = _name(dev)
         if name.startswith("cable in") and not (
@@ -236,6 +250,7 @@ def pick_cable_capture_device() -> dict[str, Any] | None:
             continue
         return dev
 
+    # 4) Windows default playback loopback if it is CABLE (old app Start Live default).
     default = pick_default_capture_device()
     if default is not None and not _is_gigaport(default):
         if "cable" in _name(default) or "vb-audio" in _name(default):
@@ -285,6 +300,14 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
         "airpods",
         "hands-free",
         "stereo mix",
+        "macbook",
+        "imac",
+        "built-in",
+        "builtin",
+        "internal",
+        "facetime",
+        "microsoft teams",
+        "teams audio",
     )
 
     def _name(dev: dict[str, Any]) -> str:
@@ -377,7 +400,7 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
             name = str(raw["name"])
             name_l = name.lower()
             if int(raw["max_input_channels"]) > 0 and not _skip_name(name_l):
-                if _is_aux_name(name_l) or not any(b in name_l for b in builtin):
+                if _is_aux_name(name_l):
                     hostapis = sd.query_hostapis()
                     try:
                         api = str(hostapis[int(raw["hostapi"])]["name"])
@@ -396,7 +419,6 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
                         "is_default_record": True,
                     }
                     scored.append((_score(name_l, "sounddevice", True) + 25, dev))
-                    print(f"[pick_aux] default record device: [{default_in}] {name} ({api})")
     except Exception as exc:  # noqa: BLE001
         print(f"[pick_aux] default input probe failed: {exc}")
 
@@ -418,10 +440,6 @@ def pick_aux_capture_device() -> dict[str, Any] | None:
         return None
     scored.sort(key=lambda t: (-t[0], _name(t[1])))
     chosen = scored[0][1]
-    print(
-        f"[pick_aux] selected score={scored[0][0]} "
-        f"name={chosen.get('name')!r} index={chosen.get('index')}"
-    )
     return chosen
 
 
@@ -526,7 +544,7 @@ def _enumerate_input_configs(device_index: int) -> list[InputStreamConfig]:
     return configs
 
 
-def _pick_output_sample_rate(output_index: int) -> int:
+def _pick_output_sample_rate(output_index: int, channels: int = SATORI_OUTPUT_CHANNELS) -> int:
     candidates = [PROCESSING_SR, 48000, 96000, 88200, 44100]
     dev = sd.query_devices(output_index)
     default_sr = int(dev.get("default_samplerate") or 0)
@@ -537,7 +555,7 @@ def _pick_output_sample_rate(output_index: int) -> int:
         try:
             sd.check_output_settings(
                 device=output_index,
-                channels=SATORI_OUTPUT_CHANNELS,
+                channels=channels,
                 samplerate=sr,
                 dtype="float32",
             )
@@ -547,13 +565,57 @@ def _pick_output_sample_rate(output_index: int) -> int:
     return PROCESSING_SR
 
 
-def _validate_output_device(output_index: int) -> None:
+def _pick_shared_output_sample_rate(
+    vibration_output_index: int,
+    audio_output_index: int,
+    vibration_channels: int,
+    audio_channels: int,
+) -> int:
+    candidates = [PROCESSING_SR, 48000, 44100, 96000, 88200]
+    for idx in (vibration_output_index, audio_output_index):
+        dev = sd.query_devices(idx)
+        default_sr = int(dev.get("default_samplerate") or 0)
+        if default_sr and default_sr not in candidates:
+            candidates.insert(1, default_sr)
+
+    for sr in candidates:
+        try:
+            sd.check_output_settings(
+                device=vibration_output_index,
+                channels=vibration_channels,
+                samplerate=sr,
+                dtype="float32",
+            )
+            sd.check_output_settings(
+                device=audio_output_index,
+                channels=audio_channels,
+                samplerate=sr,
+                dtype="float32",
+            )
+            return sr
+        except Exception:
+            continue
+    return PROCESSING_SR
+
+
+def _validate_output_device(
+    output_index: int,
+    layout: OutputLayout = "single",
+    required_channels: int | None = None,
+) -> None:
     dev = sd.query_devices(output_index)
     channels = int(dev["max_output_channels"])
-    if channels < SATORI_OUTPUT_CHANNELS:
+    need = int(required_channels) if required_channels is not None else output_channels_for_layout(layout)
+    if channels < need:
+        if layout == "dual_asio4all":
+            raise RuntimeError(
+                f"Output device '{dev['name']}' has only {channels} channel(s). "
+                f"Dual Gigaport via ASIO4ALL needs {need} channels. "
+                "In ASIO4ALL: enable both Gigaports and set 8 outputs each."
+            )
         raise RuntimeError(
             f"Output device '{dev['name']}' has only {channels} channel(s). "
-            f"Satori needs {SATORI_OUTPUT_CHANNELS} channels (Gigaport). "
+            f"Satori needs {need} channels (Gigaport). "
             "Select Gigaport in Output Device, not Intel Speakers."
         )
 
@@ -571,18 +633,32 @@ class LiveStreamProcessor:
     ) -> None:
         self.sample_rate = sample_rate
         self.zone_gain: dict[str, float] = {"head": 1.0, "upper_mid": 1.0, "legs": 1.0, "mid": 1.0}
+        self._highpass_hz = MUVI_HIGHPASS_HZ
+        self._lowpass_hz = MUVI_LOWPASS_HZ
+        self._rebuild_filters()
+        self._limit = 10.0 ** (MUVI_LIMIT_DB / 20.0)
+
+    def _rebuild_filters(self) -> None:
         nyq = self.sample_rate * 0.5
-        hp = max(1.0, min(MUVI_HIGHPASS_HZ, nyq - 10.0))
-        lp = max(hp + 1.0, min(MUVI_LOWPASS_HZ, nyq - 1.0))
-        self._sos = np.vstack(
-            (
-                butter(MUVI_FILTER_ORDER, hp / nyq, btype="high", output="sos"),
-                butter(MUVI_FILTER_ORDER, lp / nyq, btype="low", output="sos"),
-            )
-        )
+        lp = max(2.0, min(float(self._lowpass_hz), nyq - 1.0))
+        stages = [butter(MUVI_FILTER_ORDER, lp / nyq, btype="low", output="sos")]
+        # Fixed high-pass removes DC/subsonic rumble (muvi vibe_highpass_hz).
+        if float(self._highpass_hz) > 0.5:
+            hp = max(1.0, min(float(self._highpass_hz), lp - 1.0))
+            stages.insert(0, butter(MUVI_FILTER_ORDER, hp / nyq, btype="high", output="sos"))
+        self._sos = np.vstack(stages)
         self._zi_left = sosfilt_zi(self._sos)
         self._zi_right = sosfilt_zi(self._sos)
-        self._limit = 10.0 ** (MUVI_LIMIT_DB / 20.0)
+
+    def set_lowpass_hz(self, hz: float) -> None:
+        """Bass cutoff (muvi vibe_lowpass_hz): highest frequency sent to motors."""
+        self._lowpass_hz = float(np.clip(hz, 40.0, 250.0))
+        self._rebuild_filters()
+
+    def set_highpass_hz(self, hz: float) -> None:
+        """Optional subsonic cut; kept for compatibility. Prefer set_lowpass_hz."""
+        self._highpass_hz = float(np.clip(hz, 0.0, 120.0))
+        self._rebuild_filters()
 
     def update_presets(
         self,
@@ -632,8 +708,14 @@ class LiveAudioEngine:
     def __init__(self) -> None:
         self.input_stream: sd.InputStream | None = None
         self.output_stream: sd.OutputStream | None = None
+        self.audio_output_stream: sd.OutputStream | None = None
         self._loopback_thread: SoundcardLoopbackThread | None = None
         self._loopback_stop = threading.Event()
+        self._file_thread: threading.Thread | None = None
+        self._file_pcm: np.ndarray | None = None
+        self._file_pos = 0
+        self._file_lock = threading.Lock()
+        self._file_loop = True
         self._capture_ring = np.zeros((0, 2), dtype=np.float32)
         self._capture_read_idx = 0
         # Differential-delay rings (full mode): audio + vibration aligned to a
@@ -647,21 +729,38 @@ class LiveAudioEngine:
         self.processor = LiveStreamProcessor()
         self.capture_device_index: int | None = None
         self.output_device_index: int | None = None
+        self.audio_output_device_index: int | None = None
         self.capture_channels = 2
         self.input_sample_rate = PROCESSING_SR
         self.output_sample_rate = PROCESSING_SR
         self.is_active = False
         self.vibration_overlay = False
+        self.output_layout: OutputLayout = "single"
+        self.speaker_route: SpeakerRoute = "headphones"
+        self.vibration_mode: VibrationMode = "zones"
         self.output_channel_count = SATORI_OUTPUT_CHANNELS
+        self.vibration_output_channels: int | None = None
+        self.audio_output_channel_count = 4
         self.volume = 0.85
+        self.audio_muted = False
+        self.highpass_hz = MUVI_HIGHPASS_HZ
+        self.lowpass_hz = MUVI_LOWPASS_HZ
         self.intensity_mid = 1.0
         self.intensity_legs = 1.0
         self.intensity_upper = 1.0
         self.intensity_head = 1.0
         self.lock = threading.Lock()
         self._output_ring: collections.deque[np.ndarray] = collections.deque(maxlen=RING_MAX_BLOCKS)
+        self._audio_output_ring: collections.deque[np.ndarray] = collections.deque(maxlen=RING_MAX_BLOCKS)
         self._current_block: np.ndarray | None = None
         self._current_offset = 0
+        self._audio_current_block: np.ndarray | None = None
+        self._audio_current_offset = 0
+        self._ingest_error_count = 0
+        self._cb_frames = 0
+        self._cb_silent_frames = 0
+        self._audio_cb_frames = 0
+        self._audio_cb_silent_frames = 0
         self.stats: dict[str, float] = {
             "rms_legs": 0.0,
             "rms_mid": 0.0,
@@ -669,6 +768,8 @@ class LiveAudioEngine:
             "rms_head": 0.0,
             "bass_energy": 0.0,
             "input_rms": 0.0,
+            "rms_audio_left": 0.0,
+            "rms_audio_right": 0.0,
             "generated_freq_hz": 0.0,
             "cpu_usage_estimate": 0.0,
             "progress_fraction": 0.0,
@@ -679,7 +780,42 @@ class LiveAudioEngine:
 
     def set_vibration_overlay(self, enabled: bool) -> None:
         self.vibration_overlay = enabled
-        self.output_channel_count = 4 if enabled else SATORI_OUTPUT_CHANNELS
+        if enabled:
+            self.output_channel_count = 4
+        else:
+            self.output_channel_count = output_channels_for_layout(self.output_layout)
+
+    def set_output_layout(self, layout: OutputLayout) -> None:
+        if layout not in ("single", "dual_asio4all", "dual_native", "vibration_only"):
+            raise ValueError(f"Unknown output layout: {layout}")
+        self.output_layout = layout
+        if not self.vibration_overlay:
+            self.output_channel_count = output_channels_for_layout(layout)
+
+    def set_speaker_route(self, route: SpeakerRoute) -> None:
+        if route not in ("headphones", "secondary"):
+            raise ValueError(f"Unknown speaker route: {route}")
+        self.speaker_route = route
+
+    def set_vibration_mode(self, mode: VibrationMode) -> None:
+        if mode not in ("zones", "stereo"):
+            raise ValueError(f"Unknown vibration mode: {mode}")
+        self.vibration_mode = mode
+
+    def set_output_channel_plan(
+        self,
+        *,
+        vibration_channels: int,
+        audio_channels: int | None = None,
+    ) -> None:
+        self.vibration_output_channels = max(1, int(vibration_channels))
+        if audio_channels is not None:
+            self.audio_output_channel_count = max(1, int(audio_channels))
+        if not self.vibration_overlay:
+            self.output_channel_count = self.vibration_output_channels
+
+    def _effective_audio_gain(self) -> float:
+        return 0.0 if self.audio_muted else float(self.volume)
 
     def _passthrough_speakers(self, capture: np.ndarray) -> np.ndarray:
         """Fast L/R path — no vibration processing, avoids speaker dropouts."""
@@ -692,7 +828,7 @@ class LiveAudioEngine:
             stereo = resample_if_needed(stereo, self.input_sample_rate, PROCESSING_SR)
         if self.output_sample_rate != PROCESSING_SR:
             stereo = resample_if_needed(stereo, PROCESSING_SR, self.output_sample_rate)
-        return (stereo * self.volume).astype(np.float32)
+        return (stereo * self._effective_audio_gain()).astype(np.float32)
 
     def _render_vibration_only(
         self,
@@ -808,9 +944,15 @@ class LiveAudioEngine:
         if len(stereo) == 0:
             return
 
+        vol = self._effective_audio_gain()
+        left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
+        right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
+
         with self.lock:
             sync_ms = self.vibe_sync_ms
             self.stats["input_rms"] = input_level
+            self.stats["rms_audio_left"] = left_level
+            self.stats["rms_audio_right"] = right_level
 
         delay = self._capture_lag_samples(sync_ms)
         lag_ms = self._capture_lag_ms(sync_ms)
@@ -831,7 +973,13 @@ class LiveAudioEngine:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
             vib = self._render_vibration_only(chunk, already_processing_sr=True)
-            self._push_vibration_block(vib)
+            if self.vibration_overlay:
+                frames = len(vib)
+                block = np.zeros((frames, 6), dtype=np.float32)
+                block[:, 2:6] = vib[:, :4]
+                self._push_vibration_block(block)
+            else:
+                self._push_vibration_block(vib)
 
         with self.lock:
             self.stats["vibe_sync_ms"] = sync_ms
@@ -897,10 +1045,16 @@ class LiveAudioEngine:
             return
         mono = stereo.mean(axis=1)
         input_level = float(np.sqrt(np.mean(mono.astype(np.float32) ** 2) + 1e-10))
+        # Audio L/R reflect what actually reaches the speakers: capture × volume.
+        vol = self._effective_audio_gain()
+        left_level = vol * float(np.sqrt(np.mean(stereo[:, 0].astype(np.float32) ** 2) + 1e-10))
+        right_level = vol * float(np.sqrt(np.mean(stereo[:, 1].astype(np.float32) ** 2) + 1e-10))
 
         with self.lock:
             sync_ms = self.vibe_sync_ms
             self.stats["input_rms"] = input_level
+            self.stats["rms_audio_left"] = left_level
+            self.stats["rms_audio_right"] = right_level
 
         delay = self._capture_lag_samples(sync_ms)
         lag_ms = self._capture_lag_ms(sync_ms)
@@ -917,14 +1071,42 @@ class LiveAudioEngine:
             chunk = self._capture_ring[self._capture_read_idx : self._capture_read_idx + chunk_len]
             self._capture_read_idx += chunk_len
             vib = self._render_vibration_only(chunk, already_processing_sr=True)
-            audio = chunk.astype(np.float32, copy=False) * self.volume
+            audio = chunk.astype(np.float32, copy=False) * self._effective_audio_gain()
             if self.output_sample_rate != PROCESSING_SR:
                 audio = resample_if_needed(audio, PROCESSING_SR, self.output_sample_rate)
             n = min(len(audio), len(vib))
-            block = np.zeros((n, SATORI_OUTPUT_CHANNELS), dtype=np.float32)
-            block[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
-            block[:, 2:6] = vib[:n]
-            self._push_vibration_block(block)
+            if self.output_layout in ("dual_native", "vibration_only"):
+                vib_ch = int(
+                    self.vibration_output_channels
+                    or output_channels_for_layout(self.output_layout)
+                )
+                vib_out = build_vibration_only_block(
+                    vib[:n], channels=vib_ch, mode=self.vibration_mode
+                )
+                self._push_vibration_block(vib_out)
+                if (
+                    self.output_layout == "dual_native"
+                    and self.audio_output_device_index is not None
+                ):
+                    audio_ch = int(self.audio_output_channel_count)
+                    audio_out = np.zeros((n, audio_ch), dtype=np.float32)
+                    # Audio Gigaport jack map (1-based): CH1&2 headphones, CH3&4 speakers.
+                    # Must open >=4 (ideally 8) channels — a 4ch Windows Speakers
+                    # stream remaps "back" onto physical CH5&6.
+                    if self.speaker_route == "secondary" and audio_ch >= 4:
+                        audio_out[:, 2:4] = np.clip(audio[:n], -1.0, 1.0)
+                    elif audio_ch >= 2:
+                        audio_out[:, 0:2] = np.clip(audio[:n], -1.0, 1.0)
+                    with self.lock:
+                        self._audio_output_ring.append(audio_out)
+            else:
+                block = build_output_block(
+                    audio[:n],
+                    vib[:n],
+                    layout=self.output_layout,
+                    speaker_route=self.speaker_route,
+                )
+                self._push_vibration_block(block)
 
         with self.lock:
             self.stats["vibe_sync_ms"] = sync_ms
@@ -932,34 +1114,62 @@ class LiveAudioEngine:
             self.stats["audio_lag_ms"] = lag_ms
 
     def _open_output_stream(self, output_device_index: int) -> sd.OutputStream:
+        extra = wasapi_output_extra(output_device_index)
         if self.vibration_overlay:
-            # APC/overlay: write vibration only to Gigaport ch3-6 (audio comes from APC).
-            self.output_channel_count = 4
-            asio_extra = sd.AsioSettings(channel_selectors=list(GIGAPORT_VIBRATION_CHANNELS))
+            self.output_channel_count = 6
             return sd.OutputStream(
                 device=output_device_index,
-                channels=4,
+                channels=6,
                 samplerate=self.output_sample_rate,
                 dtype="float32",
                 blocksize=BLOCKSIZE,
                 callback=self._output_callback,
                 latency="low",
-                extra_settings=asio_extra,
+                extra_settings=extra,
             )
-        # Full mode: same as old PyQt app — 6 channels (audio ch1-2 + vibe ch3-6).
-        self.output_channel_count = SATORI_OUTPUT_CHANNELS
+        if self.vibration_output_channels is not None:
+            ch = self.vibration_output_channels
+        else:
+            ch = output_channels_for_layout(self.output_layout)
+        self.output_channel_count = ch
         return sd.OutputStream(
             device=output_device_index,
-            channels=SATORI_OUTPUT_CHANNELS,
+            channels=ch,
             samplerate=self.output_sample_rate,
             dtype="float32",
             blocksize=BLOCKSIZE,
             callback=self._output_callback,
             latency="low",
+            extra_settings=extra,
+        )
+
+    def _open_audio_output_stream(self, audio_output_device_index: int) -> sd.OutputStream:
+        extra = wasapi_output_extra(audio_output_device_index)
+        return sd.OutputStream(
+            device=audio_output_device_index,
+            channels=self.audio_output_channel_count,
+            samplerate=self.output_sample_rate,
+            dtype="float32",
+            blocksize=BLOCKSIZE,
+            callback=self._audio_output_callback,
+            latency="low",
+            extra_settings=extra,
         )
 
     def set_volume(self, volume: float) -> None:
         self.volume = float(np.clip(volume, 0.0, 1.2))
+
+    def set_audio_muted(self, muted: bool) -> None:
+        self.audio_muted = bool(muted)
+
+    def set_highpass_hz(self, hz: float) -> None:
+        self.highpass_hz = float(np.clip(hz, 0.0, 120.0))
+        self.processor.set_highpass_hz(self.highpass_hz)
+
+    def set_lowpass_hz(self, hz: float) -> None:
+        """Bass cutoff — muvi vibe_lowpass_hz / --cutoff."""
+        self.lowpass_hz = float(np.clip(hz, 40.0, 250.0))
+        self.processor.set_lowpass_hz(self.lowpass_hz)
 
     def set_zone_intensities(
         self,
@@ -1005,6 +1215,7 @@ class LiveAudioEngine:
         self,
         capture_device: dict[str, Any],
         output_device_index: int,
+        audio_output_device_index: int | None = None,
         *,
         loopback: bool = False,  # noqa: ARG002 - kept for API compatibility
         capture_channels: int = 2,  # noqa: ARG002 - probed per device
@@ -1017,11 +1228,21 @@ class LiveAudioEngine:
         # Full mode: app plays audio (ch1-2) + vibration (ch3-6) on Gigaport.
         # Overlay/APC mode: app plays vibration only (ch3-6); audio comes from APC.
         self.set_vibration_overlay(vibration_overlay)
-        _validate_output_device(output_device_index)
+        if self.output_layout == "dual_native":
+            if audio_output_device_index is None:
+                raise RuntimeError("dual_native layout requires an audio output device")
+            _validate_output_device(output_device_index, "dual_native")
+            _validate_output_device(
+                audio_output_device_index,
+                required_channels=max(1, int(self.audio_output_channel_count)),
+            )
+        else:
+            _validate_output_device(output_device_index, self.output_layout)
         if capture_device.get("backend") == "soundcard":
             self._start_soundcard(
                 capture_device,
                 output_device_index,
+                audio_output_device_index,
                 segmentation_id,
                 frequency_profile_id,
                 synthetic_vibro,
@@ -1036,6 +1257,7 @@ class LiveAudioEngine:
         self._start_sounddevice(
             int(capture_device["index"]),
             output_device_index,
+            audio_output_device_index,
             segmentation_id,
             frequency_profile_id,
             synthetic_vibro,
@@ -1046,6 +1268,7 @@ class LiveAudioEngine:
         self,
         capture_device: dict[str, Any],
         output_device_index: int,
+        audio_output_device_index: int | None,
         segmentation_id: str,
         frequency_profile_id: str,
         synthetic_vibro: bool,
@@ -1059,7 +1282,19 @@ class LiveAudioEngine:
 
         self.stop()
         self.output_device_index = output_device_index
-        self.output_sample_rate = _pick_output_sample_rate(output_device_index)
+        self.audio_output_device_index = audio_output_device_index
+        if self.output_layout == "dual_native" and audio_output_device_index is not None:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            audio_ch = self.audio_output_channel_count
+            self.output_sample_rate = _pick_shared_output_sample_rate(
+                output_device_index,
+                audio_output_device_index,
+                vib_ch,
+                audio_ch,
+            )
+        else:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            self.output_sample_rate = _pick_output_sample_rate(output_device_index, vib_ch)
         capture_rate = self.output_sample_rate
         soundcard_id = str(capture_device["soundcard_id"])
 
@@ -1071,14 +1306,28 @@ class LiveAudioEngine:
             synthetic_vibro=synthetic_vibro,
             synthetic_type_id=synthetic_type_id,
         )
+        self.processor.set_highpass_hz(self.highpass_hz)
+        self.processor.set_lowpass_hz(self.lowpass_hz)
+        self.processor.set_zone_gains(
+            head=self.intensity_head,
+            upper_mid=self.intensity_upper,
+            legs=self.intensity_legs,
+            mid=self.intensity_mid,
+        )
 
         with self.lock:
             self._output_ring.clear()
+            self._audio_output_ring.clear()
             self._current_block = None
             self._current_offset = 0
+            self._audio_current_block = None
+            self._audio_current_offset = 0
         self._reset_capture_ring()
 
         self.output_stream = self._open_output_stream(output_device_index)
+        if self.output_layout == "dual_native" and audio_output_device_index is not None:
+            self.audio_output_stream = self._open_audio_output_stream(audio_output_device_index)
+            self.audio_output_stream.start()
         self.output_stream.start()
 
         self._loopback_stop.clear()
@@ -1102,16 +1351,38 @@ class LiveAudioEngine:
         self,
         capture_device_index: int,
         output_device_index: int,
+        audio_output_device_index: int | None,
         segmentation_id: str,
         frequency_profile_id: str,
         synthetic_vibro: bool,
         synthetic_type_id: str,
     ) -> None:
-        _validate_output_device(output_device_index)
+        if self.output_layout == "dual_native":
+            if audio_output_device_index is None:
+                raise RuntimeError("dual_native layout requires an audio output device")
+            _validate_output_device(output_device_index, "dual_native")
+            _validate_output_device(
+                audio_output_device_index,
+                required_channels=max(1, int(self.audio_output_channel_count)),
+            )
+        else:
+            _validate_output_device(output_device_index, self.output_layout)
         self.stop()
         self.capture_device_index = capture_device_index
         self.output_device_index = output_device_index
-        self.output_sample_rate = _pick_output_sample_rate(output_device_index)
+        self.audio_output_device_index = audio_output_device_index
+        if self.output_layout == "dual_native" and audio_output_device_index is not None:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            audio_ch = self.audio_output_channel_count
+            self.output_sample_rate = _pick_shared_output_sample_rate(
+                output_device_index,
+                audio_output_device_index,
+                vib_ch,
+                audio_ch,
+            )
+        else:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            self.output_sample_rate = _pick_output_sample_rate(output_device_index, vib_ch)
         self.processor = LiveStreamProcessor(
             sample_rate=PROCESSING_SR,
             segmentation_id=segmentation_id,
@@ -1119,11 +1390,22 @@ class LiveAudioEngine:
             synthetic_vibro=synthetic_vibro,
             synthetic_type_id=synthetic_type_id,
         )
+        self.processor.set_highpass_hz(self.highpass_hz)
+        self.processor.set_lowpass_hz(self.lowpass_hz)
+        self.processor.set_zone_gains(
+            head=self.intensity_head,
+            upper_mid=self.intensity_upper,
+            legs=self.intensity_legs,
+            mid=self.intensity_mid,
+        )
 
         with self.lock:
             self._output_ring.clear()
+            self._audio_output_ring.clear()
             self._current_block = None
             self._current_offset = 0
+            self._audio_current_block = None
+            self._audio_current_offset = 0
         self._reset_capture_ring()
 
         self._loopback_stop.clear()
@@ -1139,6 +1421,16 @@ class LiveAudioEngine:
             )
             try:
                 self.output_stream = self._open_output_stream(output_device_index)
+                if self.output_layout == "dual_native" and audio_output_device_index is not None:
+                    # Non-fatal: keep vibration going even if the audio unit fails.
+                    try:
+                        self.audio_output_stream = self._open_audio_output_stream(audio_output_device_index)
+                    except Exception as audio_exc:  # noqa: BLE001
+                        self.audio_output_stream = None
+                        print(
+                            f"[live_input] live audio stream FAILED (vibration continues): {audio_exc}",
+                            flush=True,
+                        )
                 self.input_stream = sd.InputStream(
                     device=capture_device_index,
                     channels=cfg.channels,
@@ -1150,6 +1442,8 @@ class LiveAudioEngine:
                     extra_settings=cfg.extra_settings,
                 )
                 self.output_stream.start()
+                if self.audio_output_stream is not None:
+                    self.audio_output_stream.start()
                 self.input_stream.start()
                 self.is_active = True
                 return
@@ -1177,13 +1471,249 @@ class LiveAudioEngine:
             f"Could not open capture/output after {len(input_configs)} attempts.{hint}{cause}"
         ) from last_error
 
+    def start_from_pcm(
+        self,
+        pcm: np.ndarray,
+        sample_rate: int,
+        output_device_index: int,
+        audio_output_device_index: int | None = None,
+        *,
+        segmentation_id: str = "default",
+        frequency_profile_id: str = "satori",
+        synthetic_vibro: bool = False,
+        synthetic_type_id: str = "sine",
+        loop: bool = True,
+    ) -> None:
+        """Play stereo PCM through the same vibration → Gigaport path as Live capture."""
+        pcm = np.asarray(pcm, dtype=np.float32)
+        if pcm.ndim == 1:
+            pcm = np.repeat(pcm.reshape(-1, 1), 2, axis=1)
+        elif pcm.shape[1] == 1:
+            pcm = np.repeat(pcm, 2, axis=1)
+        elif pcm.shape[1] > 2:
+            pcm = pcm[:, :2]
+        if len(pcm) == 0:
+            raise RuntimeError("Demo audio is empty")
+
+        self.set_vibration_overlay(False)
+        if self.output_layout == "dual_native":
+            if audio_output_device_index is None:
+                raise RuntimeError("dual_native layout requires an audio output device")
+            _validate_output_device(output_device_index, "dual_native")
+            _validate_output_device(
+                audio_output_device_index,
+                required_channels=max(1, int(self.audio_output_channel_count)),
+            )
+        else:
+            _validate_output_device(output_device_index, self.output_layout)
+        self.stop()
+
+        self.output_device_index = output_device_index
+        self.audio_output_device_index = audio_output_device_index
+        if self.output_layout == "dual_native" and audio_output_device_index is not None:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            audio_ch = self.audio_output_channel_count
+            self.output_sample_rate = _pick_shared_output_sample_rate(
+                output_device_index,
+                audio_output_device_index,
+                vib_ch,
+                audio_ch,
+            )
+        else:
+            vib_ch = self.vibration_output_channels or output_channels_for_layout(self.output_layout)
+            self.output_sample_rate = _pick_output_sample_rate(output_device_index, vib_ch)
+        self.input_sample_rate = int(sample_rate)
+        self.capture_channels = 2
+        self.processor = LiveStreamProcessor(
+            sample_rate=PROCESSING_SR,
+            segmentation_id=segmentation_id,
+            frequency_profile_id=frequency_profile_id,
+            synthetic_vibro=synthetic_vibro,
+            synthetic_type_id=synthetic_type_id,
+        )
+        self.processor.set_highpass_hz(self.highpass_hz)
+        self.processor.set_lowpass_hz(self.lowpass_hz)
+        self.processor.set_zone_gains(
+            head=self.intensity_head,
+            upper_mid=self.intensity_upper,
+            legs=self.intensity_legs,
+            mid=self.intensity_mid,
+        )
+
+        with self.lock:
+            self._output_ring.clear()
+            self._audio_output_ring.clear()
+            self._current_block = None
+            self._current_offset = 0
+            self._audio_current_block = None
+            self._audio_current_offset = 0
+        self._reset_capture_ring()
+
+        with self._file_lock:
+            self._file_pcm = pcm
+            self._file_pos = 0
+            self._file_loop = bool(loop)
+
+        self._loopback_stop.clear()
+        self.output_stream = self._open_output_stream(output_device_index)
+        print(
+            f"[live_input] demo vibration stream: dev=#{output_device_index} "
+            f"ch={self.output_channel_count} sr={self.output_sample_rate} "
+            f"layout={self.output_layout}",
+            flush=True,
+        )
+        if self.output_layout == "dual_native" and audio_output_device_index is not None:
+            # Non-fatal: if the audio Gigaport can't open, keep vibration going
+            # so at least one device always works.
+            try:
+                self.audio_output_stream = self._open_audio_output_stream(audio_output_device_index)
+                self.audio_output_stream.start()
+                print(
+                    f"[live_input] demo audio stream: dev=#{audio_output_device_index} "
+                    f"ch={self.audio_output_channel_count} sr={self.output_sample_rate}",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.audio_output_stream = None
+                print(
+                    f"[live_input] demo audio stream FAILED (vibration continues): {exc}",
+                    flush=True,
+                )
+        self.output_stream.start()
+        self.is_active = True
+        self._file_thread = threading.Thread(
+            target=self._file_feed_loop,
+            name="demo-file-feed",
+            daemon=True,
+        )
+        self._file_thread.start()
+
+    def seek_file(self, seconds: float) -> None:
+        with self._file_lock:
+            pcm = self._file_pcm
+            if pcm is None or self.input_sample_rate <= 0:
+                return
+            frame = int(max(0.0, float(seconds)) * self.input_sample_rate)
+            self._file_pos = min(frame, len(pcm) - 1)
+        self._reset_capture_ring()
+        with self.lock:
+            self._output_ring.clear()
+            self._current_block = None
+            self._current_offset = 0
+
+    def get_file_progress(self) -> dict[str, float]:
+        with self._file_lock:
+            pcm = self._file_pcm
+            pos = self._file_pos
+            sr = float(self.input_sample_rate or 1)
+            if pcm is None or len(pcm) == 0:
+                return {"position": 0.0, "duration": 0.0, "fraction": 0.0}
+            duration = float(len(pcm)) / sr
+            position = float(pos) / sr
+            fraction = position / duration if duration > 0 else 0.0
+            return {
+                "position": position,
+                "duration": duration,
+                "fraction": max(0.0, min(1.0, fraction)),
+            }
+
+    def _file_feed_loop(self) -> None:
+        """Clocked stereo feed into the same ingest path used by Live capture.
+
+        Paced against a monotonic deadline so blocks are produced at exactly
+        real-time speed. The old fixed `sleep(block * 0.92)` fed ~9% faster
+        than the output consumed; once the output ring (deque maxlen) filled,
+        every append silently dropped the oldest block — heard as periodic
+        cutting after ~15 s of demo playback.
+        """
+        # Feed a short burst up-front: ~150 ms is absorbed by the vibe-sync
+        # delay line, the rest becomes a standing cushion in the output ring
+        # so feed-thread jitter can't underrun it.
+        prefill_blocks = 10
+        next_deadline = time.monotonic()
+
+        while not self._loopback_stop.is_set() and self.is_active:
+            with self._file_lock:
+                pcm = self._file_pcm
+                pos = self._file_pos
+                loop = self._file_loop
+            if pcm is None or len(pcm) == 0:
+                break
+
+            end = pos + BLOCKSIZE
+            if end <= len(pcm):
+                chunk = pcm[pos:end]
+                new_pos = end
+            elif loop:
+                first = pcm[pos:]
+                need = BLOCKSIZE - len(first)
+                chunk = np.concatenate([first, pcm[:need]], axis=0)
+                new_pos = need
+            else:
+                if pos >= len(pcm):
+                    break
+                chunk = pcm[pos:]
+                new_pos = len(pcm)
+
+            with self._file_lock:
+                self._file_pos = new_pos
+                total = float(len(pcm))
+                frac = float(new_pos) / total if total > 0 else 0.0
+
+            try:
+                self._ingest_capture(chunk)
+            except Exception as exc:  # noqa: BLE001
+                if self._ingest_error_count < 3:
+                    self._ingest_error_count += 1
+                    import traceback
+
+                    print(f"[live_input] demo ingest error: {exc}", flush=True)
+                    traceback.print_exc()
+
+            with self.lock:
+                self.stats["progress_fraction"] = frac
+                backlog = len(self._output_ring)
+
+            if prefill_blocks > 0:
+                prefill_blocks -= 1
+                next_deadline = time.monotonic()
+            else:
+                # Safety valve: if the ring is more than half full (output
+                # consuming slower than expected), hold off until it drains
+                # rather than letting the deque drop blocks.
+                while backlog >= RING_MAX_BLOCKS // 2:
+                    if self._loopback_stop.wait(timeout=0.02) or not self.is_active:
+                        break
+                    with self.lock:
+                        backlog = len(self._output_ring)
+                    next_deadline = time.monotonic()
+                if self._loopback_stop.is_set() or not self.is_active:
+                    break
+
+                next_deadline += float(len(chunk)) / float(max(1, self.input_sample_rate))
+                wait_s = next_deadline - time.monotonic()
+                if wait_s > 0:
+                    if self._loopback_stop.wait(timeout=wait_s):
+                        break
+                else:
+                    # Fell behind (system stall) — resync instead of bursting.
+                    next_deadline = time.monotonic()
+
+            if not loop and new_pos >= len(pcm):
+                break
+
+        self.is_active = False
+
     def stop(self) -> None:
         self.is_active = False
         self._loopback_stop.set()
+        if self._file_thread is not None:
+            self._file_thread.join(timeout=2.0)
+            self._file_thread = None
         if self._loopback_thread is not None:
             self._loopback_thread.join(timeout=2.0)
             self._loopback_thread = None
-        for stream_attr in ("input_stream", "output_stream"):
+        for stream_attr in ("input_stream", "output_stream", "audio_output_stream"):
             stream = getattr(self, stream_attr)
             if stream is None:
                 continue
@@ -1194,11 +1724,18 @@ class LiveAudioEngine:
                 pass
             setattr(self, stream_attr, None)
 
+        with self._file_lock:
+            self._file_pcm = None
+            self._file_pos = 0
+
         self._reset_capture_ring()
         with self.lock:
             self._output_ring.clear()
+            self._audio_output_ring.clear()
             self._current_block = None
             self._current_offset = 0
+            self._audio_current_block = None
+            self._audio_current_offset = 0
             self.stats = {
                 "rms_legs": 0.0,
                 "rms_mid": 0.0,
@@ -1206,6 +1743,8 @@ class LiveAudioEngine:
                 "rms_head": 0.0,
                 "bass_energy": 0.0,
                 "input_rms": 0.0,
+                "rms_audio_left": 0.0,
+                "rms_audio_right": 0.0,
                 "generated_freq_hz": 0.0,
                 "cpu_usage_estimate": 0.0,
                 "progress_fraction": 0.0,
@@ -1226,6 +1765,12 @@ class LiveAudioEngine:
         if not self._output_ring:
             return None
         return self._output_ring.popleft()
+
+    def _take_next_audio_output_block_locked(self) -> np.ndarray | None:
+        """Pop the next audio-only output block. Caller must already hold self.lock."""
+        if not self._audio_output_ring:
+            return None
+        return self._audio_output_ring.popleft()
 
     def _input_callback(self, indata, frames, _time_info, _status) -> None:
         try:
@@ -1270,3 +1815,69 @@ class LiveAudioEngine:
                     self._current_offset = 0
 
         outdata[:] = output
+        # Diagnostics: how much of this callback was real audio vs silence.
+        prev = self._cb_frames
+        self._cb_frames += frames
+        self._cb_silent_frames += (frames - offset)
+        if prev // 48000 != self._cb_frames // 48000:
+            # Per-channel peak proves whether ch 1-2 (indices 0-1) carry vibration.
+            peaks = [
+                float(np.max(np.abs(output[:, c]))) if output.shape[1] > c else 0.0
+                for c in range(min(ch_count, 8))
+            ]
+            # Quiet by default — set MUVE_AUDIO_DEBUG=1 to print callback stats.
+            if os.environ.get("MUVE_AUDIO_DEBUG"):
+                peak_txt = " ".join(f"{i + 1}:{p:.3f}" for i, p in enumerate(peaks))
+                print(
+                    f"[live_input] vib cb: served={self._cb_frames} "
+                    f"silent={self._cb_silent_frames} ring={len(self._output_ring)} "
+                    f"peaks[{peak_txt}]",
+                    flush=True,
+                )
+
+    def _audio_output_callback(self, outdata, frames, _time_info, _status) -> None:
+        needed = frames
+        offset = 0
+        ch_count = self.audio_output_channel_count
+        output = np.zeros((frames, ch_count), dtype=np.float32)
+
+        while needed > 0:
+            with self.lock:
+                if self._audio_current_block is None:
+                    self._audio_current_block = self._take_next_audio_output_block_locked()
+                    self._audio_current_offset = 0
+
+                if self._audio_current_block is None:
+                    break
+
+                block = self._audio_current_block
+                start = self._audio_current_offset
+                available = len(block) - start
+                take = min(needed, available)
+                chunk = block[start : start + take]
+
+            if take <= 0:
+                break
+
+            src_ch = min(chunk.shape[1], ch_count)
+            output[offset : offset + take, :src_ch] = chunk[:, :src_ch]
+            offset += take
+            needed -= take
+
+            with self.lock:
+                self._audio_current_offset += take
+                if self._audio_current_block is not None and self._audio_current_offset >= len(self._audio_current_block):
+                    self._audio_current_block = None
+                    self._audio_current_offset = 0
+
+        outdata[:] = output
+        prev = self._audio_cb_frames
+        self._audio_cb_frames += frames
+        self._audio_cb_silent_frames += (frames - offset)
+        if prev // 48000 != self._audio_cb_frames // 48000:
+            if os.environ.get("MUVE_AUDIO_DEBUG"):
+                print(
+                    f"[live_input] audio cb: served={self._audio_cb_frames} "
+                    f"silent={self._audio_cb_silent_frames} ring={len(self._audio_output_ring)}",
+                    flush=True,
+                )

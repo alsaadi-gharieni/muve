@@ -1,11 +1,27 @@
-PyQt5
-numpy
-scipy
-sounddevice
-soundfile
-soundcard
+# muve production app (pywebview shell)
+pywebview>=5.1
 
-# Stem separation (Demucs primary, Spleeter fallback)
-demucs
-torchcodec
-spleeter
+# Backend audio/vibration engine
+numpy>=1.26
+scipy>=1.11
+sounddevice>=0.4.6
+soundcard>=0.4.3 ; sys_platform == "win32"
+
+# Bluetooth + media session (WinRT). Install with the SAME python that runs main.py:
+#   python -m pip install -r requirements.txt
+winrt-runtime>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Media.Audio>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Media.Control>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Devices.Enumeration>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Devices.Bluetooth>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Devices.Radios>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.2.1 ; sys_platform == "win32"
+winrt-Windows.System>=3.2.1 ; sys_platform == "win32"
+
+# Set Windows default playback to VB-Cable on Play
+pycaw>=20240210 ; sys_platform == "win32"
+comtypes>=1.4.0 ; sys_platform == "win32"
+
+# Packaging to a standalone Windows .exe
+pyinstaller>=6.6

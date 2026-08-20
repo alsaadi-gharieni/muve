@@ -1,142 +1,100 @@
-# Satori Vibro Test
+# muve (production app)
 
-PyQt5 desktop app for Raspberry Pi 4 and Windows that mirrors **Satori 6-channel** output (L, R, C, LFE, Ls, Rs) through Gigaport eX at **44.1 kHz**.
+Same as old app. New UI + Bluetooth + optional AUX.
 
-## Features
+## Modes (automatic on Play)
 
-- Loads `.wav` and `.mp3` audio files
-- **Quick preview** then **Demucs** stem separation in background
-- L/R play the **original** file; vibration uses bass/drums/other (no vocals)
-- **Satori body zones** (default frequency profile):
-  - **LFE** — Legs (30–40 Hz)
-  - **C** — Mid (50–68 Hz)
-  - **Ls** — Upper mid (80–100 Hz)
-  - **Rs** — Head (100–150 Hz)
-- Segmentation and frequency presets for music vs healing content
-- Vibration intensity slider (C, LFE, Ls, Rs only)
-- Optional synthetic vibration mode
+### 1) Bluetooth (priority when connected in app)
+- **Scan** — finds nearby unpaired phones (AssociationEndpoint inquiry)
+- **Pair** — `DeviceInformationCustomPairing` with `CONFIRM_ONLY` (confirm on phone when prompted)
+- **Paired phones** refresh automatically (no separate Scan for already-paired)
+- **Connect** — `TryCreateFromId` → `StartAsync` → `OpenAsync` (APC flow)
+- **Disconnect** closes the audio link only (pairing kept)
+- **Forget** / **Forget all** call Windows `UnpairAsync` (real remove from Bluetooth)
+- App sets default playback to **CABLE Input**, captures CABLE → **Gigaport ASIO**
+- Song title / seek are not available for phone→PC Bluetooth (Windows limitation)
+- While Live is on, the timer shows **session elapsed** (`LIVE`)
+- **Prev / Next** may not control the phone on this path
 
-## Channel Mapping (Satori 5.1)
+Phone/Windows may still show a short confirm toast during Pair — that cannot be removed.
 
-| Index | Channel | Role |
-|-------|---------|------|
-| 0 | L | Original audio (left) |
-| 1 | R | Original audio (right) |
-| 2 | C | Mid body vibration |
-| 3 | LFE | Legs vibration |
-| 4 | Ls | Upper mid vibration |
-| 5 | Rs | Head vibration |
+Console:
+```
+[windows_cable] default playback → 'CABLE Input'
+[live_audio] mode=cable prefer_bt=True capture='…CABLE…' output='…ASIO…Gigaport…'
+```
 
-## Run
+### 2) AUX (Behringer / USB interface)
+- Disconnect Bluetooth in the app (or skip Connect)
+- Plug phone AUX into Behringer → USB to tablet
+- **Play** captures Behringer → **Gigaport ASIO**
 
-```bash
+Console:
+```
+[live_audio] mode=aux capture='…Behringer…' output='…ASIO…Gigaport…'
+```
+
+## 3) Demo tab
+- Plays **`assets/demo.wav`** through the **same Live → Gigaport** path (audio ch1–2 + vibration ch3–6)
+- Same volume / vibration / bass-cutoff controls as Now Playing
+- Seek / restart work on the demo file
+- Starting Demo stops Live (and vice versa) so ASIO isn’t contested
+
+
+**Easiest fix for WinRT errors on the tablet:** double-click `install_winrt.bat` in `D:\muvi_new`, wait for `SUCCESS`, then:
+
+```bat
 python main.py
 ```
 
-## Install
+`main.py` also auto-installs missing WinRT packages on startup into the same Python.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+Manual:
 
-`requirements.txt` includes **Demucs** (primary separator), **torchcodec** (Demucs WAV export), and **Spleeter** (fallback if Demucs fails).
-
-Verify 6+ output channels (Gigaport needs ASIO on Windows):
-
-```bash
-# Windows: restart terminal after setting ASIO, then:
+```bat
+cd D:\muvi_new
+python -m pip install -r requirements.txt
 python main.py
-# Or list devices:
-python -c "import os; os.environ['SD_ENABLE_ASIO']='1'; import sounddevice as sd; [print(i,d) for i,d in enumerate(sd.query_devices()) if d['max_output_channels']>=6 or 'gigaport' in d['name'].lower()]"
 ```
 
-**Gigaport not in the list?**
-1. Connect Gigaport eX via USB
-2. Install the **Gigaport ASIO driver** from [ESI](https://www.esi-audio.com)
-3. **Restart the app** (ASIO is enabled automatically on Windows at startup)
-4. Click **Refresh Devices** — select the entry marked **★ Gigaport** with **ASIO** and **6 ch**
+Always use `python -m pip` (not bare `pip`) so packages go into the same Python as `main.py`.
 
-## Notes
+Close the old muve app before Play (ASIO exclusive).
 
-- Stem separation runs in background after instant quick preview.
-- Files longer than 20 minutes are trimmed for memory stability.
-- Demucs results are cached — reloading the same file is faster.
+**Output is always Gigaport — never set app output to VB-Cable.**
 
-## Bluetooth / Live Audio (Windows Tablet)
 
-Play audio from your phone through the Satori bed:
-
-1. Pair the phone to the tablet in **Windows Bluetooth** settings.
-2. On the phone: enable **Media audio / Stereo** for the tablet (disable Calls/Hands-Free).
-3. Play music on the phone — audio should play through the tablet speaker/Bluetooth output.
-4. On the tablet run: `pip install soundcard` (once).
-5. In the app: **Refresh** → pick a **★ [Speaker Loopback]** entry for the speaker that plays phone audio.
-6. Select **Gigaport** as the 6-channel output → **Start Live**.
-
-Hands-Free Bluetooth cannot capture music on Windows — it is hidden from the device list.
-
-**Tips**
-
-- ★ entries use speaker loopback (capture what you hear).
-- Gigaport (ASIO) and Bluetooth use separate streams — they work together.
-- Volume and zone sliders apply to live audio.
+cd D:\muvi_new
+python -c "import sys; print(sys.executable)"
+python -m pip install --force-reinstall winrt-runtime winrt-Windows.Foundation.Collections winrt-Windows.Media.Control winrt-Windows.Foundation
+python -c "import winrt.windows.foundation.collections; print('OK')"
+python main.py
 
 
 
-Option 1: Disable the Windows Update service (works on Pro and Home)
-Press Win + R.
-Type:
-services.msc
-Find Windows Update.
-Double-click it.
-Click Stop.
-Set Startup type to Disabled.
-Click Apply → OK.
-To prevent Windows from restarting it:
-Go to the Recovery tab.
-Set First failure, Second failure, and Subsequent failures to Take No Action.
-Click Apply.
+
+Disable the Windows Update service using Windows-Update-Blocker-main
 
 
 
 
 
-Yes. If this is a dedicated production tablet, you can run the following commands as Administrator.
-First, stop and disable the update-related services:
-sc stop wuauserv
-sc config wuauserv start= disabled
-
-sc stop UsoSvc
-sc config UsoSvc start= disabled
-
-sc stop bits
-sc config bits start= disabled
-
-sc stop dosvc
-sc config dosvc start= disabled
-However, on Windows 10 22H2, this alone is usually not enough because Windows Update Medic Service (WaaSMedicSvc) is protected and will often re-enable Windows Update.
-If you try:
-sc config WaaSMedicSvc start= disabled
-you'll most likely get:
-[SC] ChangeServiceConfig FAILED 5:
-Access is denied.
-That's by design.
-To truly disable updates permanently
-You need TrustedInstaller permissions to disable WaaSMedicSvc. There is no built-in CMD command that can permanently do this because Windows protects the service.
-You have two practical options:
-Use a TrustedInstaller tool (such as NSudo) and then run:
-reg add "HKLM\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc" /v Start /t REG_DWORD /d 4 /f
-(4 = Disabled)
-Use Windows Update Blocker (WUB), which automates the required changes.
-If your goal is a production kiosk where updates should never run, these are the reliable approaches. Microsoft intentionally prevents standard administrator commands from permanently disabling the update infrastructure, so there isn't a single CMD command that can bypass those protections.
+pyinstaller --noconfirm --windowed --add-data "web;web" --add-data "assets;assets" main.py
 
 
 
 
 
+@echo off
+setlocal
 
+timeout /t 15 /nobreak >nul
+cd /d "%~dp0app"
+
+"C:\Users\RLX-Satori\AppData\Local\Programs\Python\Python313\python.exe" ^
+"%~dp0app\main.py" > "%~dp0startup_log.txt" 2>&1
+
+endlocal
 
 
 
